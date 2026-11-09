@@ -332,6 +332,16 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None):
         sid = db.create_shop(name, region, domain, url, 1 if url else 0)
         return jsonify({"id": sid})
 
+    @app.post("/api/shops/delete")
+    def delete_shops():
+        """Μαζική διαγραφή: {"ids": [...]}. Σβήνει και τις τιμές/ιστορικό των καταστημάτων στα προϊόντα."""
+        ids = [int(x) for x in (request.get_json() or {}).get("ids") or []]
+        shots = db.listing_screenshots([lid for sid in ids for lid in db.shop_listing_ids(sid)])
+        for sid in ids:
+            db.delete_shop(sid, delete_listings=True)
+        remove_files(shots)
+        return jsonify({"ok": True, "deleted": len(ids)})
+
     @app.delete("/api/shops/<int:sid>")
     def delete_shop(sid):
         shots = db.listing_screenshots(db.shop_listing_ids(sid))

@@ -153,7 +153,7 @@ class Database:
         row = c.execute("SELECT value FROM settings WHERE key='deleted_shop_keys'").fetchone()
         deleted = set(json.loads(row["value"])) if row and row["value"] else set()
         if not c.execute("SELECT 1 FROM settings WHERE key='removed_defaults_v04'").fetchone():
-            # Μία φορά: Amazon και MediaMarkt βγαίνουν από τη λίστα. Αν κάποιο χρησιμοποιείται ήδη σε προϊόν,
+            # Μία φορά: eBay και MediaMarkt βγαίνουν από τη λίστα. Αν κάποιο χρησιμοποιείται ήδη σε προϊόν,
             # μένει για εκείνο το προϊόν, αλλά δεν χρησιμοποιείται πια στην αναζήτηση νέων προϊόντων.
             for key in shops_mod.REMOVED_DEFAULT_KEYS:
                 r = c.execute("SELECT id FROM shops WHERE key=?", (key,)).fetchone()

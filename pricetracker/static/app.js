@@ -544,7 +544,8 @@ async function renderSettings() {
   const s = await api("GET", "/api/settings");
   const shops = await api("GET", "/api/shops");
   const regionSel = (r, attr = 'data-f="region"') => `<select ${attr}><option value="GR" ${r === "GR" ? "selected" : ""}>Ελλάδα</option><option value="EU" ${r === "EU" ? "selected" : ""}>Ε.Ε.</option><option value="OTHER" ${r === "OTHER" ? "selected" : ""}>Άλλο</option></select>`;
-  const shopRow = (sh) => `<tr data-shop="${sh.id}">
+  const shopRow = (sh) => `<tr data-shop="${sh.id}" data-used="${sh.used || 0}">
+    <td style="text-align:center"><input type="checkbox" data-sel title="Επιλογή για διαγραφή"></td>
     <td><input data-f="name" value="${esc(sh.name)}"></td>
     <td class="hint">${esc(sh.domain)}${sh.used ? `<div>${sh.used} ${sh.used === 1 ? "προϊόν" : "προϊόντα"}</div>` : ""}</td>
     <td>${regionSel(sh.region)}</td>
@@ -591,7 +592,8 @@ async function renderSettings() {
     </div>
     <div class="section"><h3>Καταστήματα</h3>
       <p class="hint">Η «Αναζήτηση» χρησιμοποιεί το URL αναζήτησης κάθε καταστήματος ({q} = το προϊόν). Καταστήματα από links που προσθέτεις μπαίνουν εδώ αυτόματα.</p>
-      <table id="s-shops"><tr><th>Όνομα</th><th>Διεύθυνση</th><th>Περιοχή</th><th>URL αναζήτησης</th><th>Αναζήτηση</th><th></th></tr>${shopRows}</table>
+      <div class="row-btns" style="margin-bottom:8px"><button class="danger" id="s-del-sel" disabled>🗑 Διαγραφή επιλεγμένων</button></div>
+      <table id="s-shops"><tr><th style="text-align:center;width:36px"><input type="checkbox" id="s-sel-all" title="Επιλογή όλων"></th><th>Όνομα</th><th>Διεύθυνση</th><th>Περιοχή</th><th>URL αναζήτησης</th><th>Αναζήτηση</th><th></th></tr>${shopRows}</table>
       <h3 style="margin-top:16px">Προσθήκη καταστήματος</h3>
       <div class="two"><div><label>Όνομα</label><input id="ns-name" placeholder="π.χ. Germanos"></div>
         <div><label>Διεύθυνση (site)</label><input id="ns-domain" placeholder="π.χ. www.germanos.gr"></div></div>
@@ -638,6 +640,29 @@ async function renderSettings() {
           toast("Το κατάστημα διαγράφηκε");
         }));
         bindDel(m);
+        const selRows = () => [...m.querySelectorAll("tr[data-shop]")].filter((tr) => $("[data-sel]", tr).checked);
+        const syncSel = () => {
+          const n = selRows().length, all = m.querySelectorAll("tr[data-shop]").length;
+          const b = $("#s-del-sel", m);
+          b.disabled = !n;
+          b.textContent = n ? `🗑 Διαγραφή επιλεγμένων (${n})` : "🗑 Διαγραφή επιλεγμένων";
+          $("#s-sel-all", m).checked = n > 0 && n === all;
+        };
+        $("#s-shops", m).addEventListener("change", (e) => { if (e.target.matches("[data-sel]")) syncSel(); });
+        $("#s-sel-all", m).onchange = (e) => { m.querySelectorAll("[data-sel]").forEach((c) => (c.checked = e.target.checked)); syncSel(); };
+        $("#s-del-sel", m).onclick = () => run(async () => {
+          const rows = selRows();
+          if (!rows.length) return;
+          const names = rows.map((tr) => esc($("[data-f=name]", tr).value));
+          const used = rows.reduce((a, tr) => a + +tr.dataset.used, 0);
+          let text = `Να διαγραφούν ${rows.length === 1 ? "το κατάστημα" : `τα ${rows.length} καταστήματα`}: <b>${names.join(", ")}</b>;`;
+          if (used) text += `<br><br>Κάποια χρησιμοποιούνται σε προϊόντα. Θα σβηστούν και οι τιμές, το ιστορικό και τα screenshots τους σε αυτά τα προϊόντα.`;
+          if (!(await confirmBox("Διαγραφή καταστημάτων", text, "Διαγραφή", true))) return;
+          await api("POST", "/api/shops/delete", { ids: rows.map((tr) => +tr.dataset.shop) });
+          rows.forEach((tr) => tr.remove());
+          syncSel();
+          toast(rows.length === 1 ? "Το κατάστημα διαγράφηκε" : `Διαγράφηκαν ${rows.length} καταστήματα`);
+        });
         $("#ns-add", m).onclick = () => run(async () => {
           const body = { name: $("#ns-name", m).value, domain: $("#ns-domain", m).value, region: $("#ns-region", m).value, search_url: $("#ns-url", m).value };
           const r = await api("POST", "/api/shops", body);
