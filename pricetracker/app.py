@@ -13,6 +13,7 @@ from pathlib import Path
 
 from .db import Database
 from .web import create_app
+from .updater import Updater
 from .worker import Worker
 
 APP_NAME = "Price Tracker"
@@ -80,8 +81,10 @@ class Shell:
         self.tray = None
         self.quitting = False
         self.on_quit = None
+        self.hidden = False
 
     def show(self):
+        self.hidden = False
         if self.window:
             self.window.show()
             try:
@@ -90,6 +93,7 @@ class Shell:
                 pass
 
     def hide(self):
+        self.hidden = True
         if self.window:
             self.window.hide()
             self.notify("Η εφαρμογή συνεχίζει στο system tray. Διπλό κλικ στο εικονίδιο για άνοιγμα.")
@@ -199,11 +203,15 @@ def main(argv=None):
     db = Database(data_dir / "pricetracker.db")
     shell = Shell(db)
     worker = Worker(db, data_dir, notify_callback=shell.notify)
-    app = create_app(db, worker, data_dir, shell=shell)
+    shell.hidden = args.tray
+    updater = Updater(db, data_dir, worker=worker, notify=shell.notify, request_quit=lambda: shell.quit(),
+                      is_hidden=lambda: shell.hidden)
+    app = create_app(db, worker, data_dir, shell=shell, updater=updater)
     srv = start_server(app)
     url = f"http://127.0.0.1:{PORT}/"
     log.info("Price Tracker ξεκίνησε, δεδομένα στο %s", data_dir)
     worker.start(check_on_start=not args.no_check)
+    updater.start()
 
     stop_event = threading.Event()
 
@@ -260,6 +268,7 @@ def main(argv=None):
 
     # ---- τερματισμός
     worker.stop()
+    updater.stop()
     if shell.tray is not None:
         try:
             shell.tray.stop()

@@ -10,7 +10,7 @@ from openpyxl.chart import LineChart, Reference
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
-from . import analysis
+from . import analysis, warranty
 from .shops import REGION_LABELS
 
 HEADER_FILL = PatternFill("solid", fgColor="1F2937")
@@ -80,6 +80,26 @@ def export_xlsx(db, data_dir: Path, out_path: Path, product_ids: list[int] | Non
                     cell.font = Font(color="2563EB", underline="single")
                 hist_ws.cell(hist_ws.max_row, 1).number_format = "dd/mm/yyyy hh:mm"
         _product_sheet(wb, db, p, listings, used)
+    purchased = [p for p in db.list_purchased() if not product_ids or p["id"] in product_ids]
+    if purchased:
+        wws = wb.create_sheet("Εγγυήσεις", 2)
+        _header(wws, ["Προϊόν", "Κατηγορία", "Ημερομηνία αγοράς", "Κατάστημα", "Τιμή", "Εγγύηση", "Λήξη εγγύησης",
+                      "Μέρες που απομένουν", "Απόδειξη"])
+        for p in purchased:
+            w = warranty.warranty_info(p)
+            wws.append([p["name"], p.get("category_name") or "", p.get("purchased_at"), p.get("purchased_shop"),
+                        p.get("purchased_price"), warranty.months_label(p.get("warranty_months")),
+                        w["warranty_end"], w["warranty_days_left"], p.get("receipt_name") or ""])
+            if p.get("receipt_file"):
+                c = wws.cell(wws.max_row, 9)
+                c.hyperlink = (Path(data_dir) / p["receipt_file"]).as_uri()
+                c.font = Font(color="2563EB", underline="single")
+        used.add("Εγγυήσεις")
+        _autowidth(wws)
+        for row in wws.iter_rows(min_row=2, min_col=5, max_col=5):
+            for c in row:
+                if isinstance(c.value, float):
+                    c.number_format = "#,##0.00 €"
     for sheet in (ws, hist_ws):
         _autowidth(sheet)
         for row in sheet.iter_rows(min_row=2):
