@@ -10,7 +10,7 @@ from openpyxl.chart import LineChart, Reference
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
-from . import analysis, warranty
+from . import analysis, fx, warranty
 from .shops import REGION_LABELS, country_label
 
 
@@ -56,32 +56,40 @@ def export_xlsx(db, data_dir: Path, out_path: Path, product_ids: list[int] | Non
     wb = Workbook()
     ws = wb.active
     ws.title = "Σύνοψη"
-    _header(ws, ["Προϊόν", "Κατηγορία", "Κατάσταση", "Κατάστημα", "Περιοχή", "Τρέχουσα τιμή", "Διαθέσιμο",
-                 "Χαμηλότερη 30 ημ.", "Συνήθης 30 ημ.", "Χαμηλότερη ποτέ", "Τιμή-στόχος", "Εκτίμηση προσφοράς",
+    _header(ws, ["Προϊόν", "Κατηγορία", "Κατάσταση", "Κατάστημα", "Περιοχή", "Τρέχουσα τιμή", "Νόμισμα", "Τιμή σε €",
+                 "Διαθέσιμο", "Χαμηλότερη 30 ημ. (€)", "Συνήθης 30 ημ. (€)", "Χαμηλότερη ποτέ (€)", "Τιμή-στόχος (€)", "Εκτίμηση προσφοράς",
                  "Τελευταίος έλεγχος", "Link"])
     hist_ws = wb.create_sheet("Ιστορικό")
-    _header(hist_ws, ["Ημερομηνία", "Προϊόν", "Κατηγορία", "Κατάστημα", "Περιοχή", "Τιμή", "Νόμισμα",
+    _header(hist_ws, ["Ημερομηνία", "Προϊόν", "Κατηγορία", "Κατάστημα", "Περιοχή", "Τιμή", "Νόμισμα", "Τιμή σε €",
                       "Διαθέσιμο", "Σφάλμα", "Screenshot", "Link"])
     used = {"Σύνοψη", "Ιστορικό"}
+    rates = db.get_settings().get("fx") or {}
+
+    def eur_of(price, cur, stored):
+        return stored if stored is not None else fx.to_eur(price, cur, rates)
+
     for p in products:
         listings = db.list_listings(product_id=p["id"], status="active")
         status = "Αγοράστηκε" if p["purchased"] else "Παρακολούθηση"
         for l in listings:
             h = db.history(listing_id=l["id"])
-            a = analysis.analyze(h)
+            for r in h:
+                r["price_eur"] = eur_of(r["price"], r.get("currency"), r.get("price_eur"))
+            a = analysis.analyze([{**r, "price": r["price_eur"]} for r in h])
             ws.append([p["name"], p.get("category_name") or "", status, l.get("shop_name"),
-                       _where(l), l.get("last_price"),
+                       _where(l), l.get("last_price"), l.get("last_currency") or "EUR",
+                       eur_of(l.get("last_price"), l.get("last_currency"), l.get("last_price_eur")),
                        "Ναι" if l.get("last_in_stock") else "Όχι", a.get("min_30"), a.get("median_30"),
                        a.get("min_all"), p.get("target_price"), a.get("label", ""), l.get("last_checked"),
                        l["url"]])
-            ws.cell(ws.max_row, 14).hyperlink = l["url"]
+            ws.cell(ws.max_row, 16).hyperlink = l["url"]
             for r in h:
                 hist_ws.append([datetime.fromisoformat(r["checked_at"]), p["name"], p.get("category_name") or "",
                                 l.get("shop_name"), _where(l), r["price"],
-                                r["currency"], None if r["in_stock"] is None else ("Ναι" if r["in_stock"] else "Όχι"),
+                                r["currency"], r["price_eur"], None if r["in_stock"] is None else ("Ναι" if r["in_stock"] else "Όχι"),
                                 r["error"] or "", r["screenshot"] or "", l["url"]])
                 if r["screenshot"]:
-                    cell = hist_ws.cell(hist_ws.max_row, 10)
+                    cell = hist_ws.cell(hist_ws.max_row, 11)
                     cell.hyperlink = (Path(data_dir) / r["screenshot"]).as_uri()
                     cell.font = Font(color="2563EB", underline="single")
                 hist_ws.cell(hist_ws.max_row, 1).number_format = "dd/mm/yyyy hh:mm"
@@ -132,7 +140,10 @@ def _product_sheet(wb, db, product, listings, used):
     by_time: dict[str, dict] = {}
     for h in hist:
         key = h["checked_at"][:13]  # ανά ώρα
-        by_time.setdefault(key, {})[h["listing_id"]] = h["price"]
+        rates = db.get_settings().get("fx") or {}
+        v = h.get("price_eur")
+        by_time.setdefault(key, {})[h["listing_id"]] = v if v is not None else fx.to_eur(h["price"], h.get("currency"),
+                                                                                         rates)
     for key in sorted(by_time):
         row = [datetime.fromisoformat(key + ":00")] + [None] * len(listings)
         for lid, price in by_time[key].items():

@@ -2,7 +2,11 @@
 // ---------------------------------------------------------------- βοηθητικά
 const $ = (s, el = document) => el.querySelector(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-const eur = (v, cur) => (v == null ? "–" : v.toLocaleString("el-GR", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " " + (cur && cur !== "EUR" ? cur : "€"));
+const CUR_SYMBOLS = { EUR: "€", USD: "$", GBP: "£", JPY: "¥", CNY: "¥", PLN: "zł", CZK: "Kč", SEK: "kr", DKK: "kr", NOK: "kr", HUF: "Ft", RON: "lei", BGN: "лв", CAD: "C$", AUD: "A$", TRY: "₺" };
+const eur = (v, cur) => (v == null ? "–" : v.toLocaleString("el-GR", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " " + (CUR_SYMBOLS[cur || "EUR"] || cur));
+// Τιμή σε ξένο νόμισμα μαζί με τη μετατροπή σε €: «450,00 $ / ≈401,28 €»
+const money = (v, cur, v_eur) => (v == null ? "–" : !cur || cur === "EUR" || v_eur == null ? eur(v, cur)
+  : `${eur(v, cur)} <span class="conv" title="Με την ισοτιμία της Ευρωπαϊκής Κεντρικής Τράπεζας">/ ≈${eur(v_eur)}</span>`);
 const fmtDate = (s) => (s ? new Date(s.replace(" ", "T")).toLocaleString("el-GR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" }) : "–");
 
 async function api(method, url, body) {
@@ -149,7 +153,7 @@ async function renderList() {
 }
 function priceBox(label, b) {
   return `<div class="price-box"><div class="lbl">${label}</div>
-    <div class="val">${b ? eur(b.price) : "–"}</div><div class="shop">${b ? esc(b.shop) + (b.country && b.country !== "Ελλάδα" ? " · " + esc(b.country) : "") : "δεν βρέθηκε διαθέσιμο"}</div></div>`;
+    <div class="val">${b ? (b.currency && b.currency !== "EUR" ? "≈" : "") + eur(b.price) : "–"}</div>${b && b.currency && b.currency !== "EUR" ? `<div class="shop">${eur(b.orig_price, b.currency)}</div>` : ""}<div class="shop">${b ? esc(b.shop) + (b.country && b.country !== "Ελλάδα" ? " · " + esc(b.country) : "") : "δεν βρέθηκε διαθέσιμο"}</div></div>`;
 }
 function cardHtml(p) {
   const chips = [];
@@ -221,11 +225,11 @@ function warrantyMonths(el) {
 const ACCEPT_RECEIPT = ".pdf,.jpg,.jpeg,.png,.webp,.heic,.gif,.bmp,.tif,.tiff,image/*,application/pdf";
 
 async function markPurchased(p) {
-  const shops = [p.best?.GR, p.best?.EU].filter(Boolean);
+  const shops = [p.best?.GR, p.best?.EU, p.best?.OTHER].filter(Boolean);
   const best = shops.sort((a, b) => a.price - b.price)[0];
   const others = (await api("GET", "/api/products?purchased=0&category=all")).filter((o) => o.id !== p.id);
   const otherRows = others.map((o) => {
-    const ob = [o.best?.GR, o.best?.EU].filter(Boolean).sort((a, b) => a.price - b.price)[0];
+    const ob = [o.best?.GR, o.best?.EU, o.best?.OTHER].filter(Boolean).sort((a, b) => a.price - b.price)[0];
     return `<tr data-other="${o.id}"><td><label class="inline"><input type="checkbox" data-pick> ${esc(o.name)}</label></td>
       <td><input data-price value="${ob ? ob.price : ""}" placeholder="τιμή €" style="width:100px"></td><td>${warrantyInput("o" + o.id)}</td></tr>`;
   }).join("");
@@ -418,7 +422,7 @@ async function renderDetail() {
   p.listings.forEach((l) => (groups[l.region] || groups.OTHER).push(l));
   const listingRows = (arr) => arr.map((l) => `<tr>
       <td><a href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.shop_name)}</a>${l.country_label && l.region !== "GR" ? ` <span class="chip">${esc(l.country_label)}</span>` : ""}<div class="hint">${esc((l.title || "").slice(0, 90))}</div></td>
-      <td class="num"><b>${eur(l.last_price, l.last_currency)}</b></td>
+      <td class="num"><b>${money(l.last_price, l.last_currency, l.last_price_eur)}</b></td>
       <td>${l.last_in_stock == null ? "–" : l.last_in_stock ? '<span class="chip ok">Ναι</span>' : '<span class="chip bad">Όχι</span>'}
           ${l.last_error ? `<div class="err">${esc(l.last_error)}</div>` : ""}</td>
       <td class="num">${eur(l.analysis.min_30)}<div class="hint">συνήθης ${eur(l.analysis.median_30)}</div></td>
@@ -463,7 +467,7 @@ async function renderDetail() {
     ${table("🇬🇷 Ελλάδα", groups.GR)}${table("🇪🇺 Ευρωπαϊκή Ένωση", groups.EU)}${table("🌍 Εκτός Ε.Ε. <span class=\"hint\">· η τιμή δεν περιλαμβάνει πιθανούς δασμούς και ΦΠΑ στο τελωνείο</span>", groups.OTHER)}
     ${shotsRows.length ? `<div class="section"><h3>Screenshots (αρχείο αναφοράς)</h3><table>
       <tr><th>Ημερομηνία</th><th>Κατάστημα</th><th>Τιμή</th><th></th></tr>
-      ${shotsRows.map((h) => `<tr><td>${fmtDate(h.checked_at)}</td><td>${esc(h.shop_name)}</td><td class="num">${eur(h.price, h.currency)}</td>
+      ${shotsRows.map((h) => `<tr><td>${fmtDate(h.checked_at)}</td><td>${esc(h.shop_name)}</td><td class="num">${money(h.price, h.currency, h.price_eur)}</td>
         <td><button class="small" data-shot="${esc(h.screenshot)}">Προβολή</button></td></tr>`).join("")}
       </table><button class="link" id="open-shots">Άνοιγμα φακέλου screenshots</button></div>` : ""}
   </div>`;
@@ -519,7 +523,8 @@ function drawChart(p) {
   const cv = $("#chart"); if (!cv) return;
   if (chart) chart.destroy();
   const byListing = {};
-  p.history.forEach((h) => { if (h.price) (byListing[h.listing_id] ||= []).push({ x: new Date(h.checked_at.replace(" ", "T")).getTime(), y: h.price, s: h.in_stock }); });
+  // Το γράφημα είναι σε €, ώστε να συγκρίνονται καταστήματα με διαφορετικό νόμισμα
+  p.history.forEach((h) => { const y = h.price_eur ?? (h.currency && h.currency !== "EUR" ? null : h.price); if (y) (byListing[h.listing_id] ||= []).push({ x: new Date(h.checked_at.replace(" ", "T")).getTime(), y, s: h.in_stock }); });
   const datasets = p.listings.filter((l) => byListing[l.id]).map((l, i) => ({
     label: `${l.shop_name} (${l.region_label})`, data: byListing[l.id], borderColor: COLORS[i % COLORS.length],
     backgroundColor: COLORS[i % COLORS.length], stepped: true, pointRadius: 2, borderWidth: 2,
@@ -618,6 +623,7 @@ async function renderSettings() {
       <label class="inline"><input type="checkbox" id="s-autoupd" ${s.auto_update ? "checked" : ""}> Αυτόματη ενημέρωση της εφαρμογής όταν βγαίνει νέα έκδοση</label>
       <p class="hint">Έκδοση <b>${esc(state.status.version || "")}</b> · <span id="s-upd-msg">${esc(state.status.update?.message || "")}</span>
         <button class="link" id="s-upd-check">Έλεγχος τώρα</button> <button class="link" id="s-upd-install" style="display:${state.status.update?.available ? "" : "none"}">Εγκατάσταση τώρα</button></p>
+      <p class="hint">Τιμές σε ξένο νόμισμα ($, £ κ.ά.) δείχνονται και σε € με τις ισοτιμίες της Ευρωπαϊκής Κεντρικής Τράπεζας<span id="s-fx">${state.status.fx_date ? ` (της ${new Date(state.status.fx_date + "T00:00:00").toLocaleDateString("el-GR")})` : ""}</span>, που ανανεώνονται σε κάθε έλεγχο. <button class="link" id="s-fx-refresh">Ανανέωση τώρα</button></p>
       <label>Υπενθύμιση πριν λήξει μια εγγύηση (μέρες, 0 = όχι)</label><input id="s-wrem" type="number" min="0" max="365" value="${s.warranty_reminder_days ?? 30}" style="width:120px">
     </div>
     <div class="section"><h3>Καταστήματα</h3>
@@ -743,6 +749,11 @@ async function renderSettings() {
             $("#s-upd-msg", m).textContent = u.message || "";
             $("#s-upd-install", m).style.display = u.available && u.supported ? "" : "none";
           }, 4000);
+        });
+        $("#s-fx-refresh", m).onclick = () => run(async () => {
+          const r = await api("POST", "/api/fx/refresh");
+          $("#s-fx", m).textContent = ` (της ${new Date(r.date + "T00:00:00").toLocaleDateString("el-GR")})`;
+          toast(`Ισοτιμίες: 1 € = ${String(r.usd).replace(".", ",")} $ · ${String(r.gbp).replace(".", ",")} £`);
         });
         $("#s-upd-install", m).onclick = () => run(async () => { await api("POST", "/api/update/install"); toast("Η ενημέρωση ξεκίνησε. Η εφαρμογή θα ξανανοίξει μόνη της.", 8000); });
         const collect = () => {

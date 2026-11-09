@@ -87,6 +87,8 @@ MIGRATIONS = {
     "products": [("receipt_id", "INTEGER REFERENCES receipts(id) ON DELETE SET NULL"),
                  ("warranty_months", "INTEGER")],
     "shops": [("country", "TEXT")],
+    "listings": [("last_price_eur", "REAL")],
+    "price_history": [("price_eur", "REAL")],
 }
 
 DEFAULT_SETTINGS = {
@@ -136,6 +138,11 @@ class Database:
             for name, decl in cols:
                 if name not in have:
                     c.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+                    if name == "last_price_eur":
+                        c.execute("UPDATE listings SET last_price_eur=last_price"
+                                  " WHERE COALESCE(last_currency,'EUR')='EUR'")
+                    elif name == "price_eur":
+                        c.execute("UPDATE price_history SET price_eur=price WHERE COALESCE(currency,'EUR')='EUR'")
 
     @contextmanager
     def conn(self):
@@ -444,13 +451,17 @@ class Database:
         with self.conn() as c:
             c.execute("DELETE FROM listings WHERE id=?", (listing_id,))
 
-    def record_check(self, listing_id, price, currency, in_stock, title=None, screenshot=None, error=None):
+    def record_check(self, listing_id, price, currency, in_stock, title=None, screenshot=None, error=None,
+                     price_eur=None):
         ts = now_iso()
+        if price_eur is None and price is not None and (currency or "EUR").upper() == "EUR":
+            price_eur = price
         with self.conn() as c:
             c.execute(
-                "INSERT INTO price_history(listing_id, checked_at, price, currency, in_stock, screenshot, error)"
-                " VALUES(?,?,?,?,?,?,?)",
-                (listing_id, ts, price, currency, None if in_stock is None else int(in_stock), screenshot, error),
+                "INSERT INTO price_history(listing_id, checked_at, price, currency, in_stock, screenshot, error,"
+                " price_eur) VALUES(?,?,?,?,?,?,?,?)",
+                (listing_id, ts, price, currency, None if in_stock is None else int(in_stock), screenshot, error,
+                 price_eur),
             )
             if error:
                 c.execute("UPDATE listings SET last_checked=?, last_error=? WHERE id=?", (ts, error, listing_id))
@@ -458,9 +469,9 @@ class Database:
                 c.execute(
                     """UPDATE listings SET last_price=?, last_currency=?, last_in_stock=?, last_checked=?,
                        last_error=NULL, title=COALESCE(?, title),
-                       last_screenshot=COALESCE(?, last_screenshot) WHERE id=?""",
+                       last_screenshot=COALESCE(?, last_screenshot), last_price_eur=? WHERE id=?""",
                     (price, currency, None if in_stock is None else int(in_stock), ts, title, screenshot,
-                     listing_id),
+                     price_eur, listing_id),
                 )
         return ts
 

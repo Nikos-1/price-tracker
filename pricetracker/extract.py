@@ -68,6 +68,23 @@ def parse_price(text) -> float | None:
     return v if v > 0 else None
 
 
+# Νόμισμα όταν η σελίδα δεν το λέει: από τη διεύθυνση του καταστήματος
+HOST_CURRENCY = {".co.uk": "GBP", ".uk": "GBP", "amazon.com": "USD", "bhphotovideo.com": "USD",
+                 "newegg.com": "USD", ".us": "USD", ".ch": "CHF", ".pl": "PLN", ".cz": "CZK", ".se": "SEK",
+                 ".dk": "DKK", ".hu": "HUF", ".ro": "RON", ".bg": "BGN"}
+
+
+def currency_for_host(host: str) -> str:
+    host = (host or "").lower()
+    for suffix, code in HOST_CURRENCY.items():
+        if suffix.startswith("."):
+            if host.endswith(suffix):
+                return code
+        elif host == suffix or host.endswith("." + suffix):
+            return code
+    return "EUR"
+
+
 def detect_currency(text, default=None) -> str | None:
     if not text:
         return default
@@ -383,7 +400,7 @@ def extract(html: str, url: str = "") -> ProductInfo:
         body = soup.body.get_text(" ") if soup.body else ""
         info.in_stock = availability_from_text(body[:20000])
     if info.currency is None and info.price is not None:
-        info.currency = "EUR"
+        info.currency = currency_for_host(host)
     if info.title:
         info.title = " ".join(info.title.split())[:300]
     return info

@@ -10,7 +10,7 @@ from flask import Flask, abort, jsonify, request, send_file, send_from_directory
 import json
 import re
 
-from . import analysis, notifier, receipts, warranty
+from . import analysis, fx, notifier, receipts, warranty
 from . import __version__
 from .db import DEFAULT_SETTINGS
 from .export import export_settings_xlsx, export_xlsx
@@ -122,19 +122,31 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None):
         return send_file(p)
 
     # ------------------------------------------------------------ helpers
+    def fill_eur(rows, price_key, cur_key, eur_key, rates=None):
+        """Συμπληρώνει την τιμή σε € όπου λείπει (παλιές εγγραφές), με τις τρέχουσες ισοτιμίες."""
+        rates = rates if rates is not None else (db.get_settings().get("fx") or {})
+        for r in rows:
+            if r.get(eur_key) is None and r.get(price_key) is not None:
+                r[eur_key] = fx.to_eur(r[price_key], r.get(cur_key), rates)
+        return rows
+
     def product_summary(p):
-        listings = db.list_listings(product_id=p["id"], status="active")
+        rates = db.get_settings().get("fx") or {}
+        listings = fill_eur(db.list_listings(product_id=p["id"], status="active"),
+                            "last_price", "last_currency", "last_price_eur", rates)
         cand = db.list_listings(product_id=p["id"], status="candidate")
         best = {}
         for region in ("GR", "EU", "OTHER"):
-            avail = [l for l in listings if l.get("region") == region and l.get("last_price")
+            # σύγκριση σε €, ώστε π.χ. $ και £ να συγκρίνονται σωστά με €
+            avail = [l for l in listings if l.get("region") == region and l.get("last_price_eur")
                      and l.get("last_in_stock")]
             if avail:
-                b = min(avail, key=lambda l: l["last_price"])
-                best[region] = {"price": b["last_price"], "shop": b["shop_name"], "url": b["url"],
+                b = min(avail, key=lambda l: l["last_price_eur"])
+                best[region] = {"price": b["last_price_eur"], "orig_price": b["last_price"],
+                                "currency": b.get("last_currency") or "EUR", "shop": b["shop_name"], "url": b["url"],
                                 "country": country_label(b.get("country"))}
-        hist = db.history(product_id=p["id"])
-        prices = [h["price"] for h in hist if h["price"]]
+        hist = fill_eur(db.history(product_id=p["id"]), "price", "currency", "price_eur", rates)
+        prices = [h["price_eur"] for h in hist if h.get("price_eur")]
         last_checked = max((l["last_checked"] for l in listings if l.get("last_checked")), default=None)
         errors = sum(1 for l in listings if l.get("last_error"))
         return {**p, "best": best, "listing_count": len(listings), "candidate_count": len(cand),
@@ -154,6 +166,8 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None):
         s["cyber_monday"] = analysis.cyber_monday(y).isoformat()
         s["pending"] = worker.pending()
         s["data_dir"] = str(data_dir)
+        fxs = settings.get("fx") or {}
+        s["fx_date"] = fxs.get("date")
         from . import __version__
 
         s["version"] = __version__
@@ -225,10 +239,13 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None):
         p = db.get_product(pid)
         if not p:
             abort(404)
-        listings = db.list_listings(product_id=pid, status="active")
+        rates = db.get_settings().get("fx") or {}
+        listings = fill_eur(db.list_listings(product_id=pid, status="active"),
+                            "last_price", "last_currency", "last_price_eur", rates)
         for l in listings:
-            h = db.history(listing_id=l["id"])
-            l["analysis"] = analysis.analyze(h)
+            h = fill_eur(db.history(listing_id=l["id"]), "price", "currency", "price_eur", rates)
+            # η εκτίμηση προσφοράς γίνεται σε €, για να συγκρίνεται με τα υπόλοιπα καταστήματα
+            l["analysis"] = analysis.analyze([{**x, "price": x.get("price_eur")} for x in h])
             l["region_label"] = REGION_LABELS.get(l.get("region"), "")
             l["country_label"] = country_label(l.get("country"))
         cands = db.list_listings(product_id=pid, status="candidate")
@@ -237,7 +254,7 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None):
             l["country_label"] = country_label(l.get("country"))
         y = datetime.now().year
         return jsonify({**product_summary(p), "listings": listings, "candidates": cands,
-                        "history": db.history(product_id=pid),
+                        "history": fill_eur(db.history(product_id=pid), "price", "currency", "price_eur"),
                         "events": [{"date": analysis.black_friday(yy).isoformat(), "label": "Black Friday"}
                                    for yy in (y - 1, y)] +
                                   [{"date": analysis.cyber_monday(yy).isoformat(), "label": "Cyber Monday"}
@@ -318,6 +335,13 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None):
         return jsonify([{**s, "region_label": REGION_LABELS.get(s["region"], ""),
                          "country_label": country_label(s.get("country")), "used": db.shop_usage(s["id"])}
                         for s in db.list_shops()])
+
+    @app.post("/api/fx/refresh")
+    def fx_refresh():
+        f = fx.get_rates(db, force=True)
+        if not f.get("rates"):
+            return err("Δεν ήταν δυνατή η λήψη ισοτιμιών (έλεγξε τη σύνδεση στο internet)")
+        return jsonify({"ok": True, "date": f.get("date"), "usd": f["rates"].get("USD"), "gbp": f["rates"].get("GBP")})
 
     @app.get("/api/countries")
     def countries():
