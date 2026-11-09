@@ -748,7 +748,9 @@ async function renderSettings() {
           el.dataset.sectors = JSON.stringify(ids);
           const b = $("[data-secs]", el); if (b) b.textContent = secLabel(ids);
         });
-        m.addEventListener("click", (e) => {
+        // Στη σελίδα και όχι στο #main: το #main μένει ίδιο σε κάθε άνοιγμα των Ρυθμίσεων και ο listener θα
+        // προστίθετο ξανά και ξανά (πολλά παράθυρα το ένα πάνω στο άλλο)
+        $(".settings-page", m).addEventListener("click", (e) => {
           const b = e.target.closest("[data-secs]");
           if (!b) return;
           const holder = b.closest("[data-sectors]");
