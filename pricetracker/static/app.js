@@ -309,12 +309,15 @@ const eventLines = {
   afterDraw(c, _a, opts) {
     const x = c.scales.x; if (!x) return;
     const ctx = c.ctx;
+    let drawn = 0;
     (opts.events || []).forEach((ev) => {
       const px = x.getPixelForValue(new Date(ev.date + "T12:00:00").getTime());
       if (px < x.left || px > x.right) return;
       ctx.save(); ctx.strokeStyle = "rgba(220,38,38,.6)"; ctx.setLineDash([4, 4]);
       ctx.beginPath(); ctx.moveTo(px, c.chartArea.top); ctx.lineTo(px, c.chartArea.bottom); ctx.stroke();
-      ctx.fillStyle = "rgba(220,38,38,.9)"; ctx.font = "11px Segoe UI"; ctx.fillText(ev.label, px + 4, c.chartArea.top + 12);
+      ctx.fillStyle = "rgba(220,38,38,.9)"; ctx.font = "11px Segoe UI"; const w = ctx.measureText(ev.label).width;
+      const tx = px + 4 + w > x.right ? px - 4 - w : px + 4;
+      ctx.fillText(ev.label, tx, c.chartArea.top + 12 + (drawn++ % 2) * 14);
       ctx.restore();
     });
   },
