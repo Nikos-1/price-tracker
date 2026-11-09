@@ -1,7 +1,7 @@
 ﻿; Πρόγραμμα εγκατάστασης Price Tracker (Inno Setup 6)
 ; Build:  iscc /DMyAppVersion=0.3.0 installer\PriceTracker.iss
 ; Εγκατάσταση ανά χρήστη (χωρίς δικαιώματα διαχειριστή), ώστε οι αυτόματες ενημερώσεις
-; να γίνονται αθόρυβα. Τα δεδομένα (Έγγραφα\PriceTracker) ΔΕΝ σβήνονται στην απεγκατάσταση.
+; να γίνονται αθόρυβα. Τα δεδομένα (Έγγραφα\PriceTracker και %LOCALAPPDATA%\PriceTracker) ΔΕΝ σβήνονται στην απεγκατάσταση.
 
 #ifndef MyAppVersion
   #define MyAppVersion "0.0.0"

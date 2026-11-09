@@ -18,6 +18,13 @@ RESULT_SELECTORS = {
                 "div[data-component-type='s-search-result'] a.a-link-normal.s-no-outline"],
     "ebay.": ["li.s-item a.s-item__link", "li.s-card a.su-link", "ul.srp-results li a[href*='/itm/']"],
     "bestprice.gr": ["a[href*='/item/']"],
+    "skroutz.gr": ["a.js-sku-link[href^='/s/']", "a[href^='/s/'][href$='.html']"],
+    "idealo.": ["a[href*='OffersOfProduct']", "a[href*='/preisvergleich/Typ']"],
+    "geizhals.": ["a.listview__name-link", "a[href*='-a'][href$='.html']"],
+    "pricerunner.com": ["a[href*='/pl/']"],
+    "pricespy.co.uk": ["a[href*='/product.php']", "a[href*='/product/']"],
+    "ledenicheur.fr": ["a[href*='/product.php']", "a[href*='/product/']"],
+    "tweakers.net": ["a[href*='/pricewatch/'][href$='.html']"],
 }
 
 # Μοτίβα URL που μοιάζουν με σελίδα προϊόντος.

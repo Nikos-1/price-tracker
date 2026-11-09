@@ -77,7 +77,8 @@ DEFAULT_SHOP_SECTORS = {
                                  "alternate_de", "cyberport", "proshop_de")},
     **{k: [ELEC] for k in ("germanos", "mindfactory", "caseking", "notebooksbilliger", "computeruniverse",
                            "pccomponentes", "ldlc", "scan_uk", "overclockers_uk", "newegg", "bhphoto")},
-    # BestPrice, Public, e-shop, Shopflix και Amazon: χωρίς γενική κατηγορία, δηλαδή για όλα
+    # BestPrice, Skroutz, idealo κ.ά. συγκρίσεις τιμών, Public, e-shop, Shopflix και Amazon: χωρίς γενική
+    # κατηγορία, δηλαδή για όλα
 }
 
 
@@ -102,6 +103,8 @@ DEFAULT_SHOPS = [
     _shop("shopflix", "Shopflix", "GR", "shopflix.gr"),
     _shop("msystems", "MSystems", "GR", "msystems.gr"),
     _shop("stelioskanaras", "Stelios Kanaras", "GR", "stelioskanaras.gr"),
+    # Σύγκριση τιμών (μηχανές αναζήτησης τιμών): χωρίς γενική κατηγορία, δηλαδή για όλα τα προϊόντα
+    _shop("skroutz", "Skroutz", "GR", "skroutz.gr", "https://www.skroutz.gr/search?keyphrase={q}"),
     # --- Ε.Ε. ---
     _shop("amazon_de", "Amazon.de", "DE", "amazon.de", "https://www.amazon.de/s?k={q}"),
     _shop("amazon_it", "Amazon.it", "IT", "amazon.it", "https://www.amazon.it/s?k={q}"),
@@ -119,10 +122,28 @@ DEFAULT_SHOPS = [
     _shop("proshop_de", "Proshop", "DE", "proshop.de"),
     _shop("pccomponentes", "PcComponentes", "ES", "pccomponentes.com", "https://www.pccomponentes.com/buscar/?query={q}"),
     _shop("ldlc", "LDLC", "FR", "ldlc.com"),
+    _shop("idealo_de", "idealo.de", "DE", "idealo.de",
+          "https://www.idealo.de/preisvergleich/MainSearchProductCategory.html?q={q}"),
+    _shop("idealo_at", "idealo.at", "AT", "idealo.at",
+          "https://www.idealo.at/preisvergleich/MainSearchProductCategory.html?q={q}"),
+    _shop("idealo_it", "idealo.it", "IT", "idealo.it",
+          "https://www.idealo.it/confronta-prezzi/MainSearchProductCategory.html?q={q}"),
+    _shop("idealo_fr", "idealo.fr", "FR", "idealo.fr",
+          "https://www.idealo.fr/prechcat/MainSearchProductCategory.html?q={q}"),
+    _shop("idealo_es", "idealo.es", "ES", "idealo.es",
+          "https://www.idealo.es/precios/MainSearchProductCategory.html?q={q}"),
+    _shop("geizhals_de", "Geizhals.de", "DE", "geizhals.de", "https://geizhals.de/?fs={q}"),
+    _shop("geizhals_at", "Geizhals.at", "AT", "geizhals.at", "https://geizhals.at/?fs={q}"),
+    _shop("ledenicheur", "LeDénicheur", "FR", "ledenicheur.fr", "https://ledenicheur.fr/search?search={q}"),
+    _shop("trovaprezzi", "Trovaprezzi", "IT", "trovaprezzi.it"),
+    _shop("tweakers", "Tweakers Pricewatch", "NL", "tweakers.net", "https://tweakers.net/pricewatch/zoeken/?keyword={q}"),
+    _shop("ceneo", "Ceneo", "PL", "ceneo.pl"),
     # --- Εκτός Ε.Ε. (στέλνουν στην Ελλάδα· προσοχή σε δασμούς και ΦΠΑ στο τελωνείο) ---
     _shop("amazon_uk", "Amazon.co.uk", "GB", "amazon.co.uk", "https://www.amazon.co.uk/s?k={q}"),
     _shop("scan_uk", "Scan", "GB", "scan.co.uk", "https://www.scan.co.uk/search?q={q}"),
     _shop("overclockers_uk", "Overclockers UK", "GB", "overclockers.co.uk"),
+    _shop("pricerunner_uk", "PriceRunner", "GB", "pricerunner.com", "https://www.pricerunner.com/search?q={q}"),
+    _shop("pricespy_uk", "PriceSpy", "GB", "pricespy.co.uk", "https://pricespy.co.uk/search?search={q}"),
     _shop("amazon_us", "Amazon.com", "US", "amazon.com", "https://www.amazon.com/s?k={q}"),
     _shop("bhphoto", "B&H Photo", "US", "bhphotovideo.com", "https://www.bhphotovideo.com/c/search?q={q}"),
     _shop("newegg", "Newegg", "US", "newegg.com", "https://www.newegg.com/p/pl?d={q}"),

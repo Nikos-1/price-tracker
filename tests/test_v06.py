@@ -100,3 +100,23 @@ def test_settings_export_import_keeps_sectors(tmp_path):
     shop2 = next(s for s in c2.get("/api/shops").get_json() if s["key"] == "bestprice")
     assert [names[i] for i in shop2["sector_ids"]] == ["Κατοικίδια"]
     assert c.get("/api/settings/export?format=xlsx").status_code == 200
+
+
+def test_internal_files_move_out_of_documents(tmp_path):
+    from pricetracker.app import move_internal_files
+
+    docs, app = tmp_path / "Documents" / "PriceTracker", tmp_path / "Local" / "PriceTracker"
+    (docs / "screenshots").mkdir(parents=True)
+    (docs / "Αποδείξεις").mkdir()
+    (docs / "browser-profile").mkdir()
+    (docs / "browser-profile" / "x").write_text("1")
+    Database(docs / "pricetracker.db").create_product("Ρολόι")
+    (docs / "app.log").write_text("old")
+    (app / "app.log").parent.mkdir(parents=True)
+    (app / "app.log").write_text("new")
+    moved = move_internal_files(docs, app)
+    assert "pricetracker.db" in moved and "browser-profile" in moved
+    assert sorted(p.name for p in docs.iterdir()) == sorted(["screenshots", "Αποδείξεις"])
+    assert (app / "app.log").read_text() == "new"
+    assert Database(app / "pricetracker.db").list_products()[0]["name"] == "Ρολόι"
+    assert move_internal_files(docs, app) == []

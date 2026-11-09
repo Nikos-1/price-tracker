@@ -45,6 +45,43 @@ def default_data_dir() -> Path:
     return Path(env) if env else documents_dir() / "PriceTracker"
 
 
+# Τα εσωτερικά αρχεία της εφαρμογής (βάση, logs, προφίλ browser, ενημερώσεις) μένουν στο %LOCALAPPDATA%\PriceTracker.
+# Στα Έγγραφα\PriceTracker μένουν μόνο όσα χρειάζεται να ανοίγει ο χρήστης: αποδείξεις, screenshots και τα Excel.
+INTERNAL_NAMES = ("pricetracker.db", "pricetracker.db-wal", "pricetracker.db-shm", "app.log", "app.log.1",
+                  "app.log.2", "app.log.3", "webview", "browser-profile", "updates")
+DISPOSABLE = ("app.log", "app.log.1", "app.log.2", "app.log.3", "updates", "webview", "browser-profile")
+
+
+def default_app_dir(data_dir: Path) -> Path:
+    if os.environ.get("PRICETRACKER_DATA"):
+        return data_dir  # δοκιμές / φορητή χρήση: όλα σε έναν φάκελο
+    base = os.environ.get("LOCALAPPDATA")
+    return Path(base) / "PriceTracker" if base else Path.home() / ".local" / "share" / "PriceTracker"
+
+
+def move_internal_files(data_dir: Path, app_dir: Path) -> list[str]:
+    """Από παλιότερες εκδόσεις: μεταφέρει τα εσωτερικά αρχεία από τα Έγγραφα στον φάκελο της εφαρμογής."""
+    import shutil
+
+    moved = []
+    if Path(data_dir).resolve() == Path(app_dir).resolve():
+        return moved
+    app_dir.mkdir(parents=True, exist_ok=True)
+    for name in INTERNAL_NAMES:
+        src, dst = data_dir / name, app_dir / name
+        if not src.exists():
+            continue
+        try:
+            if not dst.exists():
+                shutil.move(str(src), str(dst))
+                moved.append(name)
+            elif name in DISPOSABLE:  # υπάρχει ήδη νεότερο στον νέο φάκελο· το παλιό δεν χρειάζεται
+                shutil.rmtree(src) if src.is_dir() else src.unlink()
+        except OSError as e:
+            print(f"Δεν μεταφέρθηκε το {src}: {e}", file=sys.stderr)
+    return moved
+
+
 def setup_logging(data_dir: Path):
     data_dir.mkdir(parents=True, exist_ok=True)
     h = RotatingFileHandler(data_dir / "app.log", maxBytes=2_000_000, backupCount=3, encoding="utf-8")
@@ -199,12 +236,17 @@ def main(argv=None):
     if already_running():
         return 0
     data_dir = Path(args.data) if args.data else default_data_dir()
-    setup_logging(data_dir)
-    db = Database(data_dir / "pricetracker.db")
+    app_dir = data_dir if args.data else default_app_dir(data_dir)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    moved = move_internal_files(data_dir, app_dir)
+    setup_logging(app_dir)
+    if moved:
+        log.info("Μεταφέρθηκαν από τα Έγγραφα στο %s: %s", app_dir, ", ".join(moved))
+    db = Database(app_dir / "pricetracker.db")
     shell = Shell(db)
-    worker = Worker(db, data_dir, notify_callback=shell.notify)
+    worker = Worker(db, data_dir, notify_callback=shell.notify, app_dir=app_dir)
     shell.hidden = args.tray
-    updater = Updater(db, data_dir, worker=worker, notify=shell.notify, request_quit=lambda: shell.quit(),
+    updater = Updater(db, app_dir, worker=worker, notify=shell.notify, request_quit=lambda: shell.quit(),
                       is_hidden=lambda: shell.hidden)
     app = create_app(db, worker, data_dir, shell=shell, updater=updater)
     srv = start_server(app)
@@ -264,7 +306,7 @@ def main(argv=None):
             return False
 
         window.events.closing += on_closing
-        webview.start(private_mode=False, storage_path=str(data_dir / "webview"))
+        webview.start(private_mode=False, storage_path=str(app_dir / "webview"))
 
     # ---- τερματισμός
     worker.stop()
