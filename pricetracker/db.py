@@ -72,6 +72,15 @@ CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT
 );
+CREATE TABLE IF NOT EXISTS sectors (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE
+);
+CREATE TABLE IF NOT EXISTS shop_sectors (
+    shop_id INTEGER NOT NULL REFERENCES shops(id) ON DELETE CASCADE,
+    sector_id INTEGER NOT NULL REFERENCES sectors(id) ON DELETE CASCADE,
+    PRIMARY KEY (shop_id, sector_id)
+);
 CREATE TABLE IF NOT EXISTS receipts (
     id INTEGER PRIMARY KEY,
     file TEXT NOT NULL,              -- σχετική διαδρομή μέσα στον φάκελο δεδομένων
@@ -85,8 +94,11 @@ CREATE TABLE IF NOT EXISTS receipts (
 # Στήλες που προστέθηκαν σε νεότερες εκδόσεις (για βάσεις που υπάρχουν ήδη)
 MIGRATIONS = {
     "products": [("receipt_id", "INTEGER REFERENCES receipts(id) ON DELETE SET NULL"),
-                 ("warranty_months", "INTEGER")],
+                 ("warranty_months", "INTEGER"), ("sector_id", "INTEGER REFERENCES sectors(id) ON DELETE SET NULL")],
+    "categories": [("sector_id", "INTEGER REFERENCES sectors(id) ON DELETE SET NULL")],
     "shops": [("country", "TEXT")],
+    "listings": [("last_price_eur", "REAL"), ("currency_override", "TEXT"), ("currency_asked", "INTEGER")],
+    "price_history": [("price_eur", "REAL")],
 }
 
 DEFAULT_SETTINGS = {
@@ -136,6 +148,11 @@ class Database:
             for name, decl in cols:
                 if name not in have:
                     c.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+                    if name == "last_price_eur":
+                        c.execute("UPDATE listings SET last_price_eur=last_price"
+                                  " WHERE COALESCE(last_currency,'EUR')='EUR'")
+                    elif name == "price_eur":
+                        c.execute("UPDATE price_history SET price_eur=price WHERE COALESCE(currency,'EUR')='EUR'")
 
     @contextmanager
     def conn(self):
@@ -178,6 +195,25 @@ class Database:
                 "INSERT OR IGNORE INTO shops(key,name,region,domain,search_url,country) VALUES(?,?,?,?,?,?)",
                 (s["key"], s["name"], s["region"], s["domain"], s["search_url"], s["country"]),
             )
+        # Γενικές κατηγορίες καταστημάτων: οι προεπιλεγμένες μπαίνουν μία φορά, μετά τις διαχειρίζεται ο χρήστης
+        if not c.execute("SELECT 1 FROM settings WHERE key='sectors_seeded'").fetchone():
+            for name in shops_mod.DEFAULT_SECTORS:
+                c.execute("INSERT OR IGNORE INTO sectors(name) VALUES(?)", (name,))
+            c.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('sectors_seeded','true')")
+        row = c.execute("SELECT value FROM settings WHERE key='shop_sectors_done'").fetchone()
+        done = set(json.loads(row["value"])) if row and row["value"] else set()
+        sector_ids = {r["name"]: r["id"] for r in c.execute("SELECT id, name FROM sectors")}
+        for key, names in shops_mod.DEFAULT_SHOP_SECTORS.items():
+            if key in done:
+                continue  # ήδη ορίστηκαν μία φορά· από εκεί και πέρα αποφασίζει ο χρήστης
+            r = c.execute("SELECT id FROM shops WHERE key=?", (key,)).fetchone()
+            if not r:
+                continue
+            for n in names:
+                if n in sector_ids:
+                    c.execute("INSERT OR IGNORE INTO shop_sectors(shop_id, sector_id) VALUES(?,?)", (r["id"], sector_ids[n]))
+            done.add(key)
+        c.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('shop_sectors_done',?)", (json.dumps(sorted(done)),))
         # Χώρα για καταστήματα παλιότερων εκδόσεων (μόνο όπου λείπει, τίποτα άλλο δεν αλλάζει)
         defaults = {s["key"]: s["country"] for s in shops_mod.DEFAULT_SHOPS}
         for r in c.execute("SELECT id, key, domain FROM shops WHERE country IS NULL").fetchall():
@@ -204,7 +240,7 @@ class Database:
     def list_categories(self):
         with self.conn() as c:
             rows = c.execute(
-                """SELECT c.id, c.name,
+                """SELECT c.id, c.name, c.sector_id,
                           (SELECT COUNT(*) FROM products p WHERE p.category_id = c.id) AS product_count
                    FROM categories c ORDER BY c.name COLLATE NOCASE"""
             ).fetchall()
@@ -220,6 +256,65 @@ class Database:
             except sqlite3.IntegrityError:
                 raise ValueError(f"Υπάρχει ήδη κατηγορία «{name}»")
             return cur.lastrowid
+
+    def set_category_sector(self, cat_id: int, sector_id):
+        with self.conn() as c:
+            c.execute("UPDATE categories SET sector_id=? WHERE id=?", (sector_id or None, cat_id))
+
+    # ---------- γενικές κατηγορίες καταστημάτων ----------
+    def list_sectors(self):
+        with self.conn() as c:
+            rows = c.execute(
+                """SELECT s.id, s.name, (SELECT COUNT(*) FROM shop_sectors x WHERE x.sector_id = s.id) AS shop_count
+                   FROM sectors s ORDER BY s.name COLLATE NOCASE""").fetchall()
+        return [dict(r) for r in rows]
+
+    def create_sector(self, name: str) -> int:
+        name = (name or "").strip()
+        if not name:
+            raise ValueError("Το όνομα της γενικής κατηγορίας είναι κενό")
+        with self.conn() as c:
+            try:
+                return c.execute("INSERT INTO sectors(name) VALUES(?)", (name,)).lastrowid
+            except sqlite3.IntegrityError:
+                raise ValueError(f"Υπάρχει ήδη η γενική κατηγορία «{name}»")
+
+    def rename_sector(self, sector_id: int, name: str):
+        name = (name or "").strip()
+        if not name:
+            raise ValueError("Το όνομα της γενικής κατηγορίας είναι κενό")
+        with self.conn() as c:
+            try:
+                c.execute("UPDATE sectors SET name=? WHERE id=?", (name, sector_id))
+            except sqlite3.IntegrityError:
+                raise ValueError(f"Υπάρχει ήδη η γενική κατηγορία «{name}»")
+
+    def delete_sector(self, sector_id: int):
+        with self.conn() as c:
+            c.execute("UPDATE products SET sector_id=NULL WHERE sector_id=?", (sector_id,))
+            c.execute("UPDATE categories SET sector_id=NULL WHERE sector_id=?", (sector_id,))
+            c.execute("DELETE FROM shop_sectors WHERE sector_id=?", (sector_id,))
+            c.execute("DELETE FROM sectors WHERE id=?", (sector_id,))
+
+    def shop_sector_ids(self) -> dict[int, list[int]]:
+        out: dict[int, list[int]] = {}
+        with self.conn() as c:
+            for r in c.execute("SELECT shop_id, sector_id FROM shop_sectors"):
+                out.setdefault(r["shop_id"], []).append(r["sector_id"])
+        return out
+
+    def set_shop_sectors(self, shop_id: int, sector_ids):
+        with self.conn() as c:
+            c.execute("DELETE FROM shop_sectors WHERE shop_id=?", (shop_id,))
+            for sid in {int(x) for x in sector_ids or []}:
+                c.execute("INSERT OR IGNORE INTO shop_sectors(shop_id, sector_id) VALUES(?,?)", (shop_id, sid))
+
+    def product_sector(self, product_id: int):
+        """Η γενική κατηγορία του προϊόντος, ή αυτή της κατηγορίας του."""
+        with self.conn() as c:
+            r = c.execute("""SELECT COALESCE(p.sector_id, c.sector_id) AS sid FROM products p
+                             LEFT JOIN categories c ON c.id = p.category_id WHERE p.id=?""", (product_id,)).fetchone()
+        return r["sid"] if r else None
 
     def rename_category(self, cat_id: int, name: str):
         name = name.strip()
@@ -359,7 +454,7 @@ class Database:
     def update_product(self, product_id: int, **fields):
         allowed = {"name", "category_id", "target_price", "notes", "ean", "mpn", "brand", "image_url",
                    "purchased", "purchased_at", "purchased_price", "purchased_shop", "receipt_id",
-                   "warranty_months"}
+                   "warranty_months", "sector_id"}
         fields = {k: v for k, v in fields.items() if k in allowed}
         if not fields:
             return
@@ -374,8 +469,10 @@ class Database:
     def get_product(self, product_id: int):
         with self.conn() as c:
             r = c.execute(
-                """SELECT p.*, c.name AS category_name FROM products p
-                   LEFT JOIN categories c ON c.id = p.category_id WHERE p.id=?""",
+                """SELECT p.*, c.name AS category_name, COALESCE(sp.name, sc.name) AS sector_name FROM products p
+                   LEFT JOIN categories c ON c.id = p.category_id
+                   LEFT JOIN sectors sp ON sp.id = p.sector_id LEFT JOIN sectors sc ON sc.id = c.sector_id
+                   WHERE p.id=?""",
                 (product_id,),
             ).fetchone()
         return dict(r) if r else None
@@ -436,6 +533,24 @@ class Database:
         with self.conn() as c:
             return [dict(r) for r in c.execute(q, args)]
 
+    def set_listing_currency(self, listing_id: int, currency: str, to_eur) -> None:
+        """Ο χρήστης όρισε το νόμισμα ενός καταστήματος-προϊόντος: ισχύει από εδώ και πέρα και διορθώνει
+        τις τιμές που είχαν καταγραφεί χωρίς νόμισμα. to_eur(price, currency) -> € ή None."""
+        with self.conn() as c:
+            c.execute("UPDATE listings SET currency_override=?, currency_asked=0 WHERE id=?", (currency, listing_id))
+            for r in c.execute("SELECT id, price FROM price_history WHERE listing_id=? AND currency IS NULL"
+                               " AND price IS NOT NULL", (listing_id,)).fetchall():
+                c.execute("UPDATE price_history SET currency=?, price_eur=? WHERE id=?",
+                          (currency, to_eur(r["price"], currency), r["id"]))
+            l = c.execute("SELECT last_price, last_currency FROM listings WHERE id=?", (listing_id,)).fetchone()
+            if l and l["last_price"] is not None and not l["last_currency"]:
+                c.execute("UPDATE listings SET last_currency=?, last_price_eur=? WHERE id=?",
+                          (currency, to_eur(l["last_price"], currency), listing_id))
+
+    def mark_currency_asked(self, listing_id: int):
+        with self.conn() as c:
+            c.execute("UPDATE listings SET currency_asked=1 WHERE id=?", (listing_id,))
+
     def set_listing_status(self, listing_id: int, status: str):
         with self.conn() as c:
             c.execute("UPDATE listings SET status=? WHERE id=?", (status, listing_id))
@@ -444,13 +559,17 @@ class Database:
         with self.conn() as c:
             c.execute("DELETE FROM listings WHERE id=?", (listing_id,))
 
-    def record_check(self, listing_id, price, currency, in_stock, title=None, screenshot=None, error=None):
+    def record_check(self, listing_id, price, currency, in_stock, title=None, screenshot=None, error=None,
+                     price_eur=None):
         ts = now_iso()
+        if price_eur is None and price is not None and (currency or "").upper() == "EUR":
+            price_eur = price
         with self.conn() as c:
             c.execute(
-                "INSERT INTO price_history(listing_id, checked_at, price, currency, in_stock, screenshot, error)"
-                " VALUES(?,?,?,?,?,?,?)",
-                (listing_id, ts, price, currency, None if in_stock is None else int(in_stock), screenshot, error),
+                "INSERT INTO price_history(listing_id, checked_at, price, currency, in_stock, screenshot, error,"
+                " price_eur) VALUES(?,?,?,?,?,?,?,?)",
+                (listing_id, ts, price, currency, None if in_stock is None else int(in_stock), screenshot, error,
+                 price_eur),
             )
             if error:
                 c.execute("UPDATE listings SET last_checked=?, last_error=? WHERE id=?", (ts, error, listing_id))
@@ -458,9 +577,9 @@ class Database:
                 c.execute(
                     """UPDATE listings SET last_price=?, last_currency=?, last_in_stock=?, last_checked=?,
                        last_error=NULL, title=COALESCE(?, title),
-                       last_screenshot=COALESCE(?, last_screenshot) WHERE id=?""",
+                       last_screenshot=COALESCE(?, last_screenshot), last_price_eur=? WHERE id=?""",
                     (price, currency, None if in_stock is None else int(in_stock), ts, title, screenshot,
-                     listing_id),
+                     price_eur, listing_id),
                 )
         return ts
 

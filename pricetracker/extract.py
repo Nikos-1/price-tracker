@@ -68,6 +68,29 @@ def parse_price(text) -> float | None:
     return v if v > 0 else None
 
 
+# Νόμισμα όταν η σελίδα δεν το λέει: από τη διεύθυνση του καταστήματος
+HOST_CURRENCY = {".co.uk": "GBP", ".uk": "GBP", "amazon.com": "USD", "bhphotovideo.com": "USD",
+                 "newegg.com": "USD", ".us": "USD", ".ch": "CHF", ".pl": "PLN", ".cz": "CZK", ".se": "SEK",
+                 ".dk": "DKK", ".hu": "HUF", ".ro": "RON", ".bg": "BGN"}
+
+
+EURO_TLDS = {"gr", "de", "it", "fr", "es", "nl", "be", "at", "ie", "fi", "pt", "sk", "si", "ee", "lv", "lt",
+             "lu", "mt", "cy", "hr", "bg", "eu"}
+
+
+def currency_for_host(host: str) -> str | None:
+    """Νόμισμα από τη διεύθυνση, όταν η σελίδα δεν το λέει. None = άγνωστο (π.χ. .com): θα ρωτηθεί ο χρήστης."""
+    host = (host or "").lower()
+    for suffix, code in HOST_CURRENCY.items():
+        if suffix.startswith("."):
+            if host.endswith(suffix):
+                return code
+        elif host == suffix or host.endswith("." + suffix):
+            return code
+    tld = host.rsplit(".", 1)[-1] if "." in host else ""
+    return "EUR" if tld in EURO_TLDS else None
+
+
 def detect_currency(text, default=None) -> str | None:
     if not text:
         return default
@@ -273,7 +296,7 @@ def from_amazon(soup, html: str) -> ProductInfo:
     )
     if price_txt:
         p.price = parse_price(price_txt)
-        p.currency = detect_currency(price_txt, "EUR")
+        p.currency = detect_currency(price_txt, None)
     avail = _sel_text(soup, "#availability", "#outOfStock", "#availability_feature_div")
     p.in_stock = availability_from_text(avail)
     if p.in_stock is None:
@@ -301,7 +324,7 @@ def from_ebay(soup, html: str) -> ProductInfo:
     price_txt = _sel_text(soup, ".x-price-primary", "#prcIsum", ".x-bin-price__content")
     if price_txt:
         p.price = parse_price(price_txt)
-        p.currency = detect_currency(price_txt, "EUR")
+        p.currency = detect_currency(price_txt, None)
     status = _sel_text(soup, ".d-statusmessage", ".x-quantity__availability", ".ux-message__content")
     p.in_stock = availability_from_text(status)
     if p.in_stock is None and (soup.select_one("#binBtn_btn") or soup.select_one("[data-testid='x-bin-action']")
@@ -383,7 +406,7 @@ def extract(html: str, url: str = "") -> ProductInfo:
         body = soup.body.get_text(" ") if soup.body else ""
         info.in_stock = availability_from_text(body[:20000])
     if info.currency is None and info.price is not None:
-        info.currency = "EUR"
+        info.currency = currency_for_host(host)
     if info.title:
         info.title = " ".join(info.title.split())[:300]
     return info

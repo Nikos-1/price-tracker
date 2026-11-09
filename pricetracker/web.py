@@ -10,11 +10,11 @@ from flask import Flask, abort, jsonify, request, send_file, send_from_directory
 import json
 import re
 
-from . import analysis, notifier, receipts, warranty
+from . import analysis, fx, notifier, receipts, warranty
 from . import __version__
 from .db import DEFAULT_SETTINGS
 from .export import export_settings_xlsx, export_xlsx
-from .shops import COUNTRIES, REGION_LABELS, country_label, guess_country, region_of_country
+from .shops import COUNTRIES, CURRENCY_CHOICES, REGION_LABELS, country_label, guess_country, region_of_country
 
 STATIC = Path(__file__).parent / "static"
 RECEIPT_TYPES = {".pdf", ".jpg", ".jpeg", ".png", ".webp", ".heic", ".gif", ".bmp", ".tif", ".tiff"}
@@ -122,22 +122,36 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None):
         return send_file(p)
 
     # ------------------------------------------------------------ helpers
+    def fill_eur(rows, price_key, cur_key, eur_key, rates=None):
+        """Συμπληρώνει την τιμή σε € όπου λείπει (παλιές εγγραφές), με τις τρέχουσες ισοτιμίες."""
+        rates = rates if rates is not None else (db.get_settings().get("fx") or {})
+        for r in rows:
+            if r.get(eur_key) is None and r.get(price_key) is not None:
+                r[eur_key] = fx.to_eur(r[price_key], r.get(cur_key), rates)
+        return rows
+
     def product_summary(p):
-        listings = db.list_listings(product_id=p["id"], status="active")
+        rates = db.get_settings().get("fx") or {}
+        listings = fill_eur(db.list_listings(product_id=p["id"], status="active"),
+                            "last_price", "last_currency", "last_price_eur", rates)
         cand = db.list_listings(product_id=p["id"], status="candidate")
         best = {}
         for region in ("GR", "EU", "OTHER"):
-            avail = [l for l in listings if l.get("region") == region and l.get("last_price")
+            # σύγκριση σε €, ώστε π.χ. $ και £ να συγκρίνονται σωστά με €
+            avail = [l for l in listings if l.get("region") == region and l.get("last_price_eur")
                      and l.get("last_in_stock")]
             if avail:
-                b = min(avail, key=lambda l: l["last_price"])
-                best[region] = {"price": b["last_price"], "shop": b["shop_name"], "url": b["url"],
+                b = min(avail, key=lambda l: l["last_price_eur"])
+                best[region] = {"price": b["last_price_eur"], "orig_price": b["last_price"],
+                                "currency": b.get("last_currency") or "EUR", "shop": b["shop_name"], "url": b["url"],
                                 "country": country_label(b.get("country"))}
-        hist = db.history(product_id=p["id"])
-        prices = [h["price"] for h in hist if h["price"]]
+        hist = fill_eur(db.history(product_id=p["id"]), "price", "currency", "price_eur", rates)
+        prices = [h["price_eur"] for h in hist if h.get("price_eur")]
         last_checked = max((l["last_checked"] for l in listings if l.get("last_checked")), default=None)
         errors = sum(1 for l in listings if l.get("last_error"))
+        need_currency = sum(1 for l in listings if l.get("last_price") is not None and not l.get("last_currency"))
         return {**p, "best": best, "listing_count": len(listings), "candidate_count": len(cand),
+                "need_currency": need_currency,
                 "min_ever": min(prices) if prices else None, "last_checked": last_checked,
                 "error_count": errors, "any_in_stock": any(l.get("last_in_stock") for l in listings)}
 
@@ -154,6 +168,8 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None):
         s["cyber_monday"] = analysis.cyber_monday(y).isoformat()
         s["pending"] = worker.pending()
         s["data_dir"] = str(data_dir)
+        fxs = settings.get("fx") or {}
+        s["fx_date"] = fxs.get("date")
         from . import __version__
 
         s["version"] = __version__
@@ -181,7 +197,30 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None):
 
     @app.put("/api/categories/<int:cid>")
     def rename_category(cid):
-        db.rename_category(cid, (request.get_json() or {}).get("name", ""))
+        b = request.get_json() or {}
+        if "name" in b:
+            db.rename_category(cid, b.get("name", ""))
+        if "sector_id" in b:
+            db.set_category_sector(cid, _cat(b["sector_id"]))
+        return jsonify({"ok": True})
+
+    # ------------------------------------------------------------ γενικές κατηγορίες καταστημάτων
+    @app.get("/api/sectors")
+    def sectors():
+        return jsonify(db.list_sectors())
+
+    @app.post("/api/sectors")
+    def create_sector():
+        return jsonify({"id": db.create_sector((request.get_json() or {}).get("name", ""))})
+
+    @app.put("/api/sectors/<int:sid>")
+    def rename_sector(sid):
+        db.rename_sector(sid, (request.get_json() or {}).get("name", ""))
+        return jsonify({"ok": True})
+
+    @app.delete("/api/sectors/<int:sid>")
+    def delete_sector(sid):
+        db.delete_sector(sid)
         return jsonify({"ok": True})
 
     @app.delete("/api/categories/<int:cid>")
@@ -211,11 +250,22 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None):
         url = (b.get("url") or "").strip()
         if not url.startswith(("http://", "https://")):
             return err("Επικόλλησε ένα έγκυρο link προϊόντος (ξεκινά με https://)")
-        pid = db.create_product(b.get("name") or "Νέο προϊόν", _cat(b.get("category_id")),
-                                _num(b.get("target_price")), b.get("notes"))
+        cat = _cat(b.get("category_id"))
+        pid = db.create_product(b.get("name") or "Νέο προϊόν", cat, _num(b.get("target_price")), b.get("notes"))
+        if "sector_id" in b:
+            apply_sector(pid, cat, b.get("sector_id"))
         db.add_listing(pid, url)
         worker.enqueue("new_product", product_id=pid, search=bool(b.get("search", True)))
         return jsonify({"id": pid})
+
+    def apply_sector(pid, cat, sector_id):
+        """Γενική κατηγορία προϊόντος. Αν η κατηγορία του δεν έχει ακόμα, τη «μαθαίνει» κι αυτή για την επόμενη φορά."""
+        sid = _cat(sector_id)
+        db.update_product(pid, sector_id=sid)
+        if sid and cat:
+            c = next((x for x in db.list_categories() if x["id"] == cat), None)
+            if c and not c.get("sector_id"):
+                db.set_category_sector(cat, sid)
 
     def _cat(v):
         return int(v) if v not in (None, "", 0, "0") else None
@@ -225,10 +275,13 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None):
         p = db.get_product(pid)
         if not p:
             abort(404)
-        listings = db.list_listings(product_id=pid, status="active")
+        rates = db.get_settings().get("fx") or {}
+        listings = fill_eur(db.list_listings(product_id=pid, status="active"),
+                            "last_price", "last_currency", "last_price_eur", rates)
         for l in listings:
-            h = db.history(listing_id=l["id"])
-            l["analysis"] = analysis.analyze(h)
+            h = fill_eur(db.history(listing_id=l["id"]), "price", "currency", "price_eur", rates)
+            # η εκτίμηση προσφοράς γίνεται σε €, για να συγκρίνεται με τα υπόλοιπα καταστήματα
+            l["analysis"] = analysis.analyze([{**x, "price": x.get("price_eur")} for x in h])
             l["region_label"] = REGION_LABELS.get(l.get("region"), "")
             l["country_label"] = country_label(l.get("country"))
         cands = db.list_listings(product_id=pid, status="candidate")
@@ -237,7 +290,7 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None):
             l["country_label"] = country_label(l.get("country"))
         y = datetime.now().year
         return jsonify({**product_summary(p), "listings": listings, "candidates": cands,
-                        "history": db.history(product_id=pid),
+                        "history": fill_eur(db.history(product_id=pid), "price", "currency", "price_eur"),
                         "events": [{"date": analysis.black_friday(yy).isoformat(), "label": "Black Friday"}
                                    for yy in (y - 1, y)] +
                                   [{"date": analysis.cyber_monday(yy).isoformat(), "label": "Cyber Monday"}
@@ -253,6 +306,9 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None):
             fields["name"] = str(b["name"]).strip()
         if "category_id" in b:
             fields["category_id"] = _cat(b["category_id"])
+        if "sector_id" in b:
+            cur = db.get_product(pid) or {}
+            apply_sector(pid, fields.get("category_id", cur.get("category_id")), b["sector_id"])
         if "target_price" in b:
             fields["target_price"] = _num(b["target_price"])
         if "notes" in b:
@@ -305,6 +361,21 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None):
         db.set_listing_status(lid, "rejected")
         return jsonify({"ok": True})
 
+    @app.put("/api/listings/<int:lid>/currency")
+    def set_listing_currency(lid):
+        cur = ((request.get_json() or {}).get("currency") or "").upper()
+        if cur not in CURRENCY_CHOICES:
+            return err("Άγνωστο νόμισμα")
+        if not db.get_listing(lid):
+            abort(404)
+        rates = fx.get_rates(db)
+        db.set_listing_currency(lid, cur, lambda price, c: fx.to_eur(price, c, rates))
+        return jsonify({"ok": True})
+
+    @app.get("/api/currencies")
+    def currencies():
+        return jsonify(CURRENCY_CHOICES)
+
     @app.delete("/api/listings/<int:lid>")
     def delete_listing(lid):
         shots = db.listing_screenshots([lid])
@@ -315,9 +386,18 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None):
     # ------------------------------------------------------------ shops
     @app.get("/api/shops")
     def shops():
+        sec = db.shop_sector_ids()
         return jsonify([{**s, "region_label": REGION_LABELS.get(s["region"], ""),
-                         "country_label": country_label(s.get("country")), "used": db.shop_usage(s["id"])}
+                         "country_label": country_label(s.get("country")), "used": db.shop_usage(s["id"]),
+                         "sector_ids": sec.get(s["id"], [])}
                         for s in db.list_shops()])
+
+    @app.post("/api/fx/refresh")
+    def fx_refresh():
+        f = fx.get_rates(db, force=True)
+        if not f.get("rates"):
+            return err("Δεν ήταν δυνατή η λήψη ισοτιμιών (έλεγξε τη σύνδεση στο internet)")
+        return jsonify({"ok": True, "date": f.get("date"), "usd": f["rates"].get("USD"), "gbp": f["rates"].get("GBP")})
 
     @app.get("/api/countries")
     def countries():
@@ -326,6 +406,8 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None):
     @app.put("/api/shops/<int:sid>")
     def update_shop(sid):
         b = request.get_json() or {}
+        if "sector_ids" in b:
+            db.set_shop_sectors(sid, b.pop("sector_ids") or [])
         if "search_enabled" in b:
             b["search_enabled"] = 1 if b["search_enabled"] else 0
         if "country" in b:
@@ -363,6 +445,8 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None):
         if url and "{q}" not in url:
             return err("Το URL αναζήτησης πρέπει να περιέχει {q} στη θέση του προϊόντος")
         sid = db.create_shop(name, region, domain, url, 1 if url else 0, country=country)
+        if b.get("sector_ids"):
+            db.set_shop_sectors(sid, b["sector_ids"])
         detecting = False
         if not url and hasattr(worker, "detect"):
             worker.detect[sid] = {"state": "queued", "message": "Σε αναμονή…"}
@@ -449,13 +533,17 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None):
 
     def settings_payload() -> dict:
         s = db.get_settings()
+        sec_names = {x["id"]: x["name"] for x in db.list_sectors()}
+        shop_secs = db.shop_sector_ids()
         return {
             "app": "PriceTracker", "kind": "settings", "version": __version__,
             "exported_at": datetime.now().replace(microsecond=0).isoformat(),
             "settings": {k: s.get(k, v) for k, v in DEFAULT_SETTINGS.items()},
             "shops": [{"name": x["name"], "domain": x["domain"], "region": x["region"], "country": x.get("country") or "",
-                       "search_url": x.get("search_url") or "", "search_enabled": bool(x.get("search_enabled"))}
+                       "search_url": x.get("search_url") or "", "search_enabled": bool(x.get("search_enabled")),
+                       "sectors": [sec_names[i] for i in shop_secs.get(x["id"], []) if i in sec_names]}
                       for x in db.list_shops()],
+            "sectors": sorted(sec_names.values()),
         }
 
     def save_export(kind: str) -> Path:
@@ -463,7 +551,11 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None):
         out_dir = data_dir / "exports"
         out_dir.mkdir(parents=True, exist_ok=True)
         if kind == "xlsx":
-            shops = [{**x, "used": db.shop_usage(x["id"])} for x in db.list_shops()]
+            names = {x["id"]: x["name"] for x in db.list_sectors()}
+            secs = db.shop_sector_ids()
+            shops = [{**x, "used": db.shop_usage(x["id"]),
+                      "sectors": ", ".join(names[i] for i in secs.get(x["id"], []) if i in names)}
+                     for x in db.list_shops()]
             return export_settings_xlsx(db.get_settings(), shops, out_dir / f"Ρυθμίσεις και καταστήματα {stamp}.xlsx")
         out = out_dir / f"PriceTracker ρυθμίσεις {stamp}.json"
         out.write_text(json.dumps(settings_payload(), ensure_ascii=False, indent=2), encoding="utf-8")
@@ -504,6 +596,15 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None):
         db.set_settings(settings)
         from .shops import host_of
 
+        def sector_id(name):
+            name = str(name or "").strip()
+            if not name:
+                return None
+            have = next((x["id"] for x in db.list_sectors() if x["name"].lower() == name.lower()), None)
+            return have or db.create_sector(name)
+
+        for n in data.get("sectors") or []:
+            sector_id(n)
         added = updated = 0
         for x in data.get("shops") or []:
             if not isinstance(x, dict):
@@ -526,6 +627,10 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None):
             else:
                 db.create_shop(name, region, domain, url, enabled, country=country)
                 added += 1
+            if isinstance(x.get("sectors"), list):
+                shop = db.shop_by_domain(domain)
+                if shop:
+                    db.set_shop_sectors(shop["id"], [i for i in map(sector_id, x["sectors"]) if i])
         apply_autostart(settings)
         return jsonify({"ok": True, "settings": len(settings), "shops_added": added, "shops_updated": updated})
 

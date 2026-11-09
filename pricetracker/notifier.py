@@ -9,6 +9,8 @@ import ssl
 from email.message import EmailMessage
 from pathlib import Path
 
+from . import fx
+
 log = logging.getLogger(__name__)
 
 KEYRING_SERVICE = "PriceTracker-SMTP"
@@ -101,13 +103,14 @@ def format_alerts(alerts: list[dict]) -> tuple[str, str, str]:
     kinds = {"in_stock": "Διαθέσιμο ξανά", "target": "Έφτασε την τιμή-στόχο", "new_low": "Νέα χαμηλότερη τιμή"}
     if len(alerts) == 1:
         a = alerts[0]
-        subject = f"[Price Tracker] {kinds.get(a['kind'], 'Ειδοποίηση')}: {a['product']} – {a['price']:.2f} € ({a['shop']})"
+        subject = (f"[Price Tracker] {kinds.get(a['kind'], 'Ειδοποίηση')}: {a['product']} – "
+                   f"{fx.fmt_with_eur(a.get('price'), a.get('currency'), a.get('price_eur'))} ({a['shop']})")
     else:
         subject = f"[Price Tracker] {len(alerts)} ειδοποιήσεις για τα προϊόντα σου"
     lines, rows = [], []
     for a in alerts:
-        price = f"{a['price']:.2f} {a.get('currency') or 'EUR'}" if a.get("price") else "-"
-        extra = f" (στόχος {a['target']:.2f})" if a.get("target") else ""
+        price = fx.fmt_with_eur(a.get("price"), a.get("currency"), a.get("price_eur"))
+        extra = f" (στόχος {fx.fmt(a['target'])})" if a.get("target") else ""
         lines.append(f"• {kinds.get(a['kind'], a['kind'])}: {a['product']} – {price}{extra} στο {a['shop']} "
                      f"[{a.get('region_label', '')}]\n  {a['url']}")
         rows.append(
