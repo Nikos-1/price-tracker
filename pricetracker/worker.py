@@ -120,8 +120,41 @@ class Worker:
                 self.status.update(running=self.pending() > 0, task="", progress=0, total=0)
 
     # ------------------------------------------------------------ jobs
+    def browser_mode(self) -> str:
+        s = self.db.get_settings()
+        mode = s.get("browser_mode")
+        if mode in ("auto", "hidden", "visible"):
+            return mode
+        return "visible" if s.get("headless") is False else "auto"
+
     def _browser(self):
-        return Browser(headless=bool(self.db.get_settings().get("headless", True)))
+        return Browser(headless=self.browser_mode() != "visible", profile_dir=self.data_dir / "browser-profile")
+
+    def _ask_user_to_unblock(self, br: Browser, url: str, reason: str):
+        """Ανοίγει ορατό browser μόνο για αυτή τη σελίδα, ώστε ο χρήστης να λύσει π.χ. ένα captcha.
+
+        Επιστρέφει (page, res) όταν η σελίδα ξεμπλοκάρει, αλλιώς None. Ο browser ξαναγίνεται κρυφός μετά.
+        """
+        self._log(f"Χρειάζεται ενέργεια: {reason}")
+        if self.notify_callback:
+            try:
+                self.notify_callback("Χρειάζεται η βοήθειά σου: λύσε την επιβεβαίωση (captcha) στο παράθυρο που άνοιξε. "
+                                     "Οι έλεγχοι συνεχίζουν μόλις τελειώσεις.")
+            except Exception:  # noqa: BLE001
+                pass
+        br.restart(headless=False)
+        page, res = br.open(url)
+        self.status["task"] = "Περιμένω να λύσεις το captcha στο παράθυρο του browser…"
+        ok = br.wait_until(page, lambda html: not extract(html, url).blocked, timeout_s=180)
+        if ok:
+            page.wait_for_timeout(1500)
+            res.html, res.final_url = page.content(), page.url
+            return page, res
+        try:
+            page.close()
+        except Exception:  # noqa: BLE001
+            pass
+        return None
 
     def check_listings(self, listings: list[dict], label: str):
         # Τα αγορασμένα προϊόντα δεν ελέγχονται πια
@@ -153,8 +186,21 @@ class Worker:
         prev_ok = [h for h in prev_hist if not h["error"]]
         prev = prev_ok[-1] if prev_ok else None
         page, res = br.open(l["url"])
+        interactive = False
         try:
             info = extract(res.html, res.final_url)
+            if info.blocked and br.headless and self.browser_mode() == "auto":
+                try:
+                    page.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                interactive = True
+                got = self._ask_user_to_unblock(br, l["url"], info.blocked)
+                if got is None:
+                    page = None
+                    raise RuntimeError(info.blocked + " (δεν λύθηκε μέσα σε 3 λεπτά)")
+                page, res = got
+                info = extract(res.html, res.final_url)
             if info.blocked:
                 raise RuntimeError(info.blocked)
             if res.status and res.status >= 400 and info.price is None:
@@ -180,9 +226,12 @@ class Worker:
                     self._log(f"Screenshot απέτυχε: {e}")
         finally:
             try:
-                page.close()
+                if page is not None:
+                    page.close()
             except Exception:  # noqa: BLE001
                 pass
+            if interactive:
+                br.restart(headless=True)  # πίσω σε κρυφό browser για τα υπόλοιπα
         self.db.record_check(l["id"], info.price, info.currency, in_stock, title=info.title, screenshot=shot)
         # Συμπλήρωση στοιχείων προϊόντος αν λείπουν
         upd = {}

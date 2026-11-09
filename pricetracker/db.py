@@ -96,7 +96,7 @@ DEFAULT_SETTINGS = {
     "bf_window_auto": True,          # 20/11 – 2/12 κάθε χρονιάς
     "bf_start": "",                  # MM-DD αν bf_window_auto = False
     "bf_end": "",
-    "headless": True,
+    "browser_mode": "auto",          # auto | hidden | visible
     "close_action": "ask",           # ask | tray | exit
     "start_with_windows": False,
     "notify_back_in_stock": True,
@@ -150,7 +150,11 @@ class Database:
                 c.close()
 
     def _seed(self, c):
+        row = c.execute("SELECT value FROM settings WHERE key='deleted_shop_keys'").fetchone()
+        deleted = set(json.loads(row["value"])) if row and row["value"] else set()
         for s in shops_mod.DEFAULT_SHOPS:
+            if s["key"] in deleted:
+                continue
             c.execute(
                 "INSERT OR IGNORE INTO shops(key,name,region,domain,search_url) VALUES(?,?,?,?,?)",
                 (s["key"], s["name"], s["region"], s["domain"], s["search_url"]),
@@ -241,6 +245,35 @@ class Database:
             if cur.lastrowid and cur.rowcount:
                 return cur.lastrowid
             return c.execute("SELECT id FROM shops WHERE key=?", (key,)).fetchone()["id"]
+
+    def shop_by_domain(self, domain: str):
+        domain = domain.lower().strip().removeprefix("www.")
+        with self.conn() as c:
+            r = c.execute("SELECT * FROM shops WHERE domain=?", (domain,)).fetchone()
+        return dict(r) if r else None
+
+    def shop_usage(self, shop_id: int) -> int:
+        with self.conn() as c:
+            return c.execute("SELECT COUNT(DISTINCT product_id) FROM listings WHERE shop_id=?",
+                             (shop_id,)).fetchone()[0]
+
+    def delete_shop(self, shop_id: int, delete_listings: bool = False):
+        shop = self.get_shop(shop_id)
+        if not shop:
+            return
+        used = self.shop_usage(shop_id)
+        if used and not delete_listings:
+            raise ValueError(f"Το κατάστημα «{shop['name']}» χρησιμοποιείται σε {used} "
+                             f"{'προϊόν' if used == 1 else 'προϊόντα'}")
+        with self.conn() as c:
+            c.execute("DELETE FROM listings WHERE shop_id=?", (shop_id,))
+            c.execute("DELETE FROM shops WHERE id=?", (shop_id,))
+            if not shop["key"].startswith("custom_"):
+                row = c.execute("SELECT value FROM settings WHERE key='deleted_shop_keys'").fetchone()
+                keys = set(json.loads(row["value"])) if row and row["value"] else set()
+                keys.add(shop["key"])
+                c.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('deleted_shop_keys',?)",
+                          (json.dumps(sorted(keys)),))
 
     def shop_for_url(self, url: str) -> dict:
         """Βρίσκει (ή δημιουργεί) το κατάστημα για ένα URL."""
@@ -421,3 +454,11 @@ class Database:
                    WHERE p.purchased = 1 ORDER BY p.purchased_at DESC, p.name"""
             ).fetchall()
         return [dict(r) for r in rows]
+
+    def set_receipt_file(self, receipt_id: int, file: str):
+        with self.conn() as c:
+            c.execute("UPDATE receipts SET file=? WHERE id=?", (file, receipt_id))
+
+    def receipt_ids(self) -> list[int]:
+        with self.conn() as c:
+            return [r[0] for r in c.execute("SELECT id FROM receipts")]

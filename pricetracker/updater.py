@@ -25,14 +25,22 @@ API_URL = os.environ.get("PRICETRACKER_UPDATE_URL", f"https://api.github.com/rep
 ASSET_NAME = "PriceTracker-windows.zip"
 CHECK_EVERY_HOURS = 12
 
+SETUP_ASSET = "PriceTracker-Setup.exe"
+
+# Τρέχει αφού κλείσει η εφαρμογή: είτε το πρόγραμμα εγκατάστασης αθόρυβα, είτε αντιγραφή των αρχείων (zip).
 PS_SCRIPT = r"""
-param([int]$ProcId, [string]$Src, [string]$Dst, [string]$Exe, [string]$ExeArgs, [string]$Log)
+param([int]$ProcId, [string]$Mode, [string]$Src, [string]$Dst, [string]$Exe, [string]$ExeArgs, [string]$Log)
 $ErrorActionPreference = 'Continue'
-"$(Get-Date -Format s) Αναμονή για κλείσιμο της εφαρμογής ($ProcId)" | Out-File -Append -Encoding utf8 $Log
+"$(Get-Date -Format s) Αναμονή για κλείσιμο της εφαρμογής ($ProcId), τρόπος: $Mode" | Out-File -Append -Encoding utf8 $Log
 try { Wait-Process -Id $ProcId -Timeout 90 -ErrorAction SilentlyContinue } catch {}
 Start-Sleep -Seconds 2
-robocopy $Src $Dst /E /R:10 /W:2 /NFL /NDL /NJH /NJS /NP | Out-File -Append -Encoding utf8 $Log
-"$(Get-Date -Format s) robocopy exit $LASTEXITCODE" | Out-File -Append -Encoding utf8 $Log
+if ($Mode -eq 'setup') {
+  $p = Start-Process -FilePath $Src -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/CURRENTUSER',"/DIR=`"$Dst`"" -Wait -PassThru
+  "$(Get-Date -Format s) setup exit $($p.ExitCode)" | Out-File -Append -Encoding utf8 $Log
+} else {
+  robocopy $Src $Dst /E /R:10 /W:2 /NFL /NDL /NJH /NJS /NP | Out-File -Append -Encoding utf8 $Log
+  "$(Get-Date -Format s) robocopy exit $LASTEXITCODE" | Out-File -Append -Encoding utf8 $Log
+}
 if ($ExeArgs) { Start-Process -FilePath $Exe -ArgumentList $ExeArgs } else { Start-Process -FilePath $Exe }
 """
 
@@ -44,6 +52,15 @@ def parse_version(v: str) -> tuple:
 
 def is_frozen() -> bool:
     return bool(getattr(sys, "frozen", False))
+
+
+def install_dir() -> Path:
+    return Path(sys.executable).parent
+
+
+def installed_with_setup() -> bool:
+    """Εγκατεστημένο με το PriceTracker-Setup.exe (υπάρχει πρόγραμμα απεγκατάστασης δίπλα στο exe)."""
+    return any(install_dir().glob("unins*.exe"))
 
 
 class Updater:
@@ -105,10 +122,11 @@ class Updater:
         with urllib.request.urlopen(req, timeout=30) as r:
             data = json.loads(r.read().decode("utf-8"))
         assets = {a["name"]: a["browser_download_url"] for a in data.get("assets", [])}
-        if ASSET_NAME not in assets:
+        if ASSET_NAME not in assets and SETUP_ASSET not in assets:
             return None
-        return {"version": data.get("tag_name", "").lstrip("v"), "url": assets[ASSET_NAME],
-                "sha_url": assets.get(ASSET_NAME + ".sha256"), "notes": data.get("body") or ""}
+        return {"version": data.get("tag_name", "").lstrip("v"), "url": assets.get(ASSET_NAME),
+                "sha_url": assets.get(ASSET_NAME + ".sha256"), "setup_url": assets.get(SETUP_ASSET),
+                "setup_sha_url": assets.get(SETUP_ASSET + ".sha256"), "notes": data.get("body") or ""}
 
     def check(self) -> bool:
         self.state.update(state="checking", message="Έλεγχος για νέα έκδοση…")
@@ -136,21 +154,31 @@ class Updater:
         else:
             self.notify(f"Υπάρχει νέα έκδοση {self._release['version']}. Εγκατάσταση από τις Ρυθμίσεις.")
 
-    def download(self, rel: dict) -> Path:
+    def _fetch(self, url: str, sha_url: str | None, dest: Path) -> Path:
         self.dir.mkdir(parents=True, exist_ok=True)
-        zpath = self.dir / f"PriceTracker-{rel['version']}.zip"
-        self.state.update(state="downloading", message=f"Λήψη έκδοσης {rel['version']}…")
-        req = urllib.request.Request(rel["url"], headers={"User-Agent": f"PriceTracker/{__version__}"})
-        with urllib.request.urlopen(req, timeout=300) as r, open(zpath, "wb") as f:
+        req = urllib.request.Request(url, headers={"User-Agent": f"PriceTracker/{__version__}"})
+        with urllib.request.urlopen(req, timeout=300) as r, open(dest, "wb") as f:
             shutil.copyfileobj(r, f)
-        if rel.get("sha_url"):
-            req = urllib.request.Request(rel["sha_url"], headers={"User-Agent": f"PriceTracker/{__version__}"})
+        if sha_url:
+            req = urllib.request.Request(sha_url, headers={"User-Agent": f"PriceTracker/{__version__}"})
             with urllib.request.urlopen(req, timeout=30) as r:
                 expected = r.read().decode().split()[0].strip().lower()
-            actual = hashlib.sha256(zpath.read_bytes()).hexdigest()
+            actual = hashlib.sha256(dest.read_bytes()).hexdigest()
             if actual != expected:
-                zpath.unlink(missing_ok=True)
+                dest.unlink(missing_ok=True)
                 raise RuntimeError("Το αρχείο της ενημέρωσης δεν πέρασε τον έλεγχο ακεραιότητας")
+        return dest
+
+    def download_setup(self, rel: dict) -> Path:
+        self.state.update(state="downloading", message=f"Λήψη έκδοσης {rel['version']}…")
+        return self._fetch(rel["setup_url"], rel.get("setup_sha_url"),
+                           self.dir / f"PriceTracker-Setup-{rel['version']}.exe")
+
+    def download(self, rel: dict) -> Path:
+        if not rel.get("url"):
+            raise RuntimeError("Η νέα έκδοση δεν έχει αρχείο zip")
+        self.state.update(state="downloading", message=f"Λήψη έκδοσης {rel['version']}…")
+        zpath = self._fetch(rel["url"], rel.get("sha_url"), self.dir / f"PriceTracker-{rel['version']}.zip")
         target = self.dir / f"PriceTracker-{rel['version']}"
         if target.exists():
             shutil.rmtree(target, ignore_errors=True)
@@ -171,25 +199,29 @@ class Updater:
         rel = self._release
         if not is_frozen():
             raise RuntimeError("Η αυτόματη εγκατάσταση γίνεται μόνο στο PriceTracker.exe")
-        new_dir = self.download(rel)
+        use_setup = installed_with_setup() and rel.get("setup_url")
+        new_path = self.download_setup(rel) if use_setup else self.download(rel)
         # Περίμενε να τελειώσει τυχόν έλεγχος τιμών
         while self.worker is not None and (self.worker.status.get("running") or self.worker.pending()):
             self.state.update(state="waiting", message="Η ενημέρωση περιμένει να τελειώσει ο τρέχων έλεγχος…")
             time.sleep(10)
         self.state.update(state="installing", message=f"Εγκατάσταση έκδοσης {rel['version']}…")
         self.notify(f"Ενημέρωση σε έκδοση {rel['version']}. Η εφαρμογή θα ξανανοίξει σε λίγα δευτερόλεπτα.")
-        self.launch_installer(new_dir)
+        self.launch_installer(new_path, "setup" if use_setup else "copy")
         time.sleep(2)
         if self.request_quit:
             self.request_quit()
 
-    def launch_installer(self, new_dir: Path):
-        install_dir = Path(sys.executable).parent
+    def launch_installer(self, src: Path, mode: str = "copy"):
+        target = install_dir()
         script = self.dir / "apply_update.ps1"
         script.write_text(PS_SCRIPT, encoding="utf-8-sig")
         args = "--tray" if self.is_hidden() else ""
         cmd = ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden",
-               "-File", str(script), "-ProcId", str(os.getpid()), "-Src", str(new_dir), "-Dst", str(install_dir),
-               "-Exe", str(install_dir / "PriceTracker.exe"), "-ExeArgs", args, "-Log", str(self.dir / "update.log")]
-        flags = 0x08000000 | 0x00000008  # CREATE_NO_WINDOW | DETACHED_PROCESS
+               "-File", str(script), "-ProcId", str(os.getpid()), "-Mode", mode, "-Src", str(src),
+               "-Dst", str(target), "-Exe", str(target / "PriceTracker.exe"),
+               "-Log", str(self.dir / "update.log")]
+        if args:  # τελευταίο, ώστε ένα κενό όρισμα να μη «φάει» το επόμενο
+            cmd += ["-ExeArgs", args]
+        flags = 0x08000000  # CREATE_NO_WINDOW: κανένα παράθυρο κονσόλας
         subprocess.Popen(cmd, creationflags=flags, close_fds=True)

@@ -55,11 +55,14 @@ class PageResult:
 class Browser:
     """Ένας browser για όλους τους ελέγχους ενός κύκλου. Χρησιμοποιείται μόνο από ένα thread."""
 
-    def __init__(self, headless: bool = True):
+    _ua_cache: dict[str, str] = {}
+
+    def __init__(self, headless: bool = True, profile_dir: Path | None = None):
         self.headless = headless
+        self.profile_dir = Path(profile_dir) if profile_dir else None
         self._pw = None
-        self._browser = None
         self._context = None
+        self._launch_opts = None
         self._last_host_time: dict[str, float] = {}
 
     def __enter__(self):
@@ -68,6 +71,28 @@ class Browser:
 
     def __exit__(self, *exc):
         self.close()
+
+    def _launch(self, opts: dict, user_agent: str | None):
+        common = dict(
+            headless=self.headless,
+            args=["--disable-blink-features=AutomationControlled"],
+            locale="el-GR",
+            timezone_id="Europe/Athens",
+            viewport={"width": 1366, "height": 900},
+            extra_http_headers={"Accept-Language": "el-GR,el;q=0.9,en;q=0.8,de;q=0.7"},
+            **opts,
+        )
+        if user_agent:
+            common["user_agent"] = user_agent
+        if self.profile_dir:
+            # Μόνιμο προφίλ: cookies (π.χ. αποδοχή cookies, λυμένο captcha) κρατιούνται ανάμεσα στους ελέγχους
+            self.profile_dir.mkdir(parents=True, exist_ok=True)
+            return self._pw.chromium.launch_persistent_context(str(self.profile_dir), **common)
+        browser = self._pw.chromium.launch(headless=common.pop("headless"), args=common.pop("args"),
+                                           **{k: common.pop(k) for k in list(common) if k in ("channel", "executable_path")})
+        ctx = browser.new_context(**common)
+        ctx._pt_browser = browser  # για να κλείσει μαζί
+        return ctx
 
     def start(self):
         from playwright.sync_api import sync_playwright
@@ -80,42 +105,72 @@ class Browser:
             attempts.append({"executable_path": exe})
         attempts += [{"channel": "msedge"}, {"channel": "chrome"}, {}]
         for opts in attempts:
+            key = repr(opts)
             try:
-                self._browser = self._pw.chromium.launch(
-                    headless=self.headless,
-                    args=["--disable-blink-features=AutomationControlled"],
-                    **opts,
-                )
+                self._context = self._launch(opts, self._ua_cache.get(key))
+                if key not in self._ua_cache:
+                    page = self._context.pages[0] if self._context.pages else self._context.new_page()
+                    ua = page.evaluate("navigator.userAgent")
+                    clean = ua.replace("HeadlessChrome", "Chrome").replace("HeadlessEdg", "Edg")
+                    self._ua_cache[key] = clean
+                    if clean != ua:  # ξανά με «κανονικό» user agent
+                        self._close_context()
+                        self._context = self._launch(opts, clean)
+                self._launch_opts = opts
                 break
             except Exception as e:  # noqa: BLE001
-                errors.append(f"{opts or 'chromium'}: {e}")
-        if self._browser is None:
+                self._close_context()
+                errors.append(f"{opts or 'chromium'}: {str(e).splitlines()[0]}")
+        if self._context is None:
             self._pw.stop()
+            self._pw = None
             raise RuntimeError("Δεν βρέθηκε browser (Edge/Chrome). " + " | ".join(errors))
-        ua = self._browser.new_page().evaluate("navigator.userAgent")
-        ua = ua.replace("HeadlessChrome", "Chrome").replace("HeadlessEdg", "Edg")
-        self._context = self._browser.new_context(
-            user_agent=ua,
-            locale="el-GR",
-            timezone_id="Europe/Athens",
-            viewport={"width": 1366, "height": 900},
-            extra_http_headers={"Accept-Language": "el-GR,el;q=0.9,en;q=0.8,de;q=0.7"},
-        )
         self._context.add_init_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
 
-    def close(self):
-        for obj in (self._context, self._browser):
+    def _close_context(self):
+        ctx, self._context = self._context, None
+        if ctx is None:
+            return
+        try:
+            ctx.close()
+        except Exception:  # noqa: BLE001
+            pass
+        br = getattr(ctx, "_pt_browser", None)
+        if br is not None:
             try:
-                if obj:
-                    obj.close()
+                br.close()
             except Exception:  # noqa: BLE001
                 pass
+
+    def close(self):
+        self._close_context()
         try:
             if self._pw:
                 self._pw.stop()
         except Exception:  # noqa: BLE001
             pass
-        self._pw = self._browser = self._context = None
+        self._pw = None
+
+    def restart(self, headless: bool):
+        """Ξανανοίγει τον browser κρυφό ή ορατό, με το ίδιο προφίλ."""
+        self.close()
+        self.headless = headless
+        self.start()
+
+    @staticmethod
+    def wait_until(page, done, timeout_s: int = 180, every_s: float = 3.0) -> bool:
+        """Περιμένει (π.χ. τον χρήστη να λύσει ένα captcha) μέχρι το done(html) να γίνει True."""
+        end = time.time() + timeout_s
+        while time.time() < end:
+            try:
+                if done(page.content()):
+                    return True
+            except Exception:  # noqa: BLE001
+                pass
+            if page.is_closed():
+                return False
+            time.sleep(every_s)
+        return False
 
     def _polite_wait(self, url: str):
         from .shops import host_of
