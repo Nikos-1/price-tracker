@@ -31,9 +31,10 @@ def _slug(text: str, n=40) -> str:
 
 
 class Worker:
-    def __init__(self, db, data_dir: Path, notify_callback=None):
+    def __init__(self, db, data_dir: Path, notify_callback=None, app_dir: Path | None = None):
         self.db = db
-        self.data_dir = Path(data_dir)
+        self.data_dir = Path(data_dir)  # Έγγραφα\PriceTracker: screenshots
+        self.app_dir = Path(app_dir) if app_dir else self.data_dir  # εσωτερικά: προφίλ browser
         self.shots_dir = self.data_dir / "screenshots"
         self.q: queue.Queue = queue.Queue()
         self.notify_callback = notify_callback  # π.χ. ειδοποίηση στο system tray
@@ -157,7 +158,7 @@ class Worker:
         return "visible" if s.get("headless") is False else "auto"
 
     def _browser(self):
-        return Browser(headless=self.browser_mode() != "visible", profile_dir=self.data_dir / "browser-profile")
+        return Browser(headless=self.browser_mode() != "visible", profile_dir=self.app_dir / "browser-profile")
 
     def _ask_user_to_unblock(self, br: Browser, url: str, reason: str):
         """Ανοίγει ορατό browser μόνο για αυτή τη σελίδα, ώστε ο χρήστης να λύσει π.χ. ένα captcha.

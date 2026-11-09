@@ -100,3 +100,56 @@ def test_settings_export_import_keeps_sectors(tmp_path):
     shop2 = next(s for s in c2.get("/api/shops").get_json() if s["key"] == "bestprice")
     assert [names[i] for i in shop2["sector_ids"]] == ["Κατοικίδια"]
     assert c.get("/api/settings/export?format=xlsx").status_code == 200
+
+
+def test_internal_files_move_out_of_documents(tmp_path):
+    from pricetracker.app import move_internal_files
+
+    docs, app = tmp_path / "Documents" / "PriceTracker", tmp_path / "Local" / "PriceTracker"
+    (docs / "screenshots").mkdir(parents=True)
+    (docs / "Αποδείξεις").mkdir()
+    (docs / "browser-profile").mkdir()
+    (docs / "browser-profile" / "x").write_text("1")
+    Database(docs / "pricetracker.db").create_product("Ρολόι")
+    (docs / "app.log").write_text("old")
+    (app / "app.log").parent.mkdir(parents=True)
+    (app / "app.log").write_text("new")
+    moved = move_internal_files(docs, app)
+    assert "pricetracker.db" in moved and "browser-profile" in moved
+    assert sorted(p.name for p in docs.iterdir()) == sorted(["screenshots", "Αποδείξεις"])
+    assert (app / "app.log").read_text() == "new"
+    assert Database(app / "pricetracker.db").list_products()[0]["name"] == "Ρολόι"
+    assert move_internal_files(docs, app) == []
+
+
+def test_new_default_sectors_added_on_upgrade_but_not_deleted_ones(tmp_path):
+    import sqlite3
+
+    from pricetracker.shops import DEFAULT_SECTORS, DEFAULT_SECTORS_V06
+
+    db = Database(tmp_path / "db.sqlite")
+    assert {x["name"] for x in db.list_sectors()} == set(DEFAULT_SECTORS)
+    # Προσομοίωση v0.6: μόνο οι 11 παλιές, μία σβησμένη από τον χρήστη, σημάδι 'true'
+    con = sqlite3.connect(tmp_path / "db.sqlite")
+    con.executemany("DELETE FROM sectors WHERE name=?", [(n,) for n in DEFAULT_SECTORS if n not in DEFAULT_SECTORS_V06])
+    con.execute("DELETE FROM sectors WHERE name='Βιβλία'")
+    con.execute("UPDATE settings SET value='true' WHERE key='sectors_seeded'")
+    con.commit()
+    con.close()
+    names = {x["name"] for x in Database(tmp_path / "db.sqlite").list_sectors()}
+    assert "Κινητά & τηλέφωνα" in names and "Επαγγελματικός εξοπλισμός" in names
+    assert "Βιβλία" not in names and "Κατοικίδια" not in names
+    db3 = Database(tmp_path / "db.sqlite")
+    sid = next(x["id"] for x in db3.list_sectors() if x["name"] == "Gaming & κονσόλες")
+    db3.delete_sector(sid)
+    assert "Gaming & κονσόλες" not in {x["name"] for x in Database(tmp_path / "db.sqlite").list_sectors()}
+
+
+def test_electronics_shops_get_new_related_sectors(tmp_path):
+    db = Database(tmp_path / "db.sqlite")
+    names = {x["id"]: x["name"] for x in db.list_sectors()}
+    plaisio = next(s for s in db.list_shops() if s["key"] == "plaisio")
+    got = {names[i] for i in db.shop_sector_ids()[plaisio["id"]]}
+    assert {"Κινητά & τηλέφωνα", "Τηλεοράσεις & ήχος", "Ηλεκτρικές συσκευές"} <= got
+    skroutz = next(s for s in db.list_shops() if s["key"] == "skroutz")
+    assert not db.shop_sector_ids().get(skroutz["id"])
