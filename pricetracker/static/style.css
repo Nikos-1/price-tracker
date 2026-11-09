@@ -110,3 +110,4 @@ html.settings-view .sidebar { display: none; }
 .page .btns { display: flex; justify-content: flex-end; gap: 8px; margin: 18px 0 30px; flex-wrap: wrap; }
 .settings-page .section table input, .settings-page .section table select { min-width: 90px; }
 .row-btns { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+.cat-pick { width: auto; max-width: 220px; padding: 2px 6px; font-size: 12px; margin-top: 4px; }

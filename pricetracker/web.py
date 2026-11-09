@@ -64,10 +64,26 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None):
             except OSError:
                 pass
 
+    def purge_search_data(pid: int):
+        """Σβήνει μόνο τα δεδομένα αναζήτησης: καταστήματα του προϊόντος, τιμές, ιστορικό και screenshots."""
+        shots = db.product_screenshots(pid)
+        for l in db.list_listings(product_id=pid, status=None):
+            db.delete_listing(l["id"])  # το ιστορικό σβήνεται μαζί (ON DELETE CASCADE)
+        remove_files(shots)
+        shots_root = data_dir / "screenshots"
+        if shots_root.is_dir():
+            for d in shots_root.glob(f"{pid}_*"):
+                if d.is_dir():
+                    shutil.rmtree(d, ignore_errors=True)
+
     def purge_product(pid: int):
-        """Διαγραφή προϊόντος με ό,τι το αφορά: τιμές, ιστορικό, screenshots και (αν δεν είναι κοινή) απόδειξη."""
+        """Διαγραφή προϊόντος. Αν έχει αγοραστεί, μένει στα αγορασμένα με αγορά, εγγύηση και απόδειξη,
+        και σβήνονται μόνο τα δεδομένα αναζήτησης. Αλλιώς σβήνεται εντελώς."""
         p = db.get_product(pid)
         if not p:
+            return
+        if p.get("purchased"):
+            purge_search_data(pid)
             return
         shots = db.product_screenshots(pid)
         receipt = db.get_receipt(p["receipt_id"]) if p.get("receipt_id") else None
@@ -599,7 +615,10 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None):
     @app.get("/api/warranties")
     def warranties():
         out = []
+        cat = request.args.get("category", "all")
         for p in db.list_purchased():
+            if cat not in ("all", "") and (p.get("category_id") or 0) != int(cat):
+                continue
             w = warranty.warranty_info(p)
             out.append({**p, **w, "warranty_label": warranty.months_label(p.get("warranty_months"))})
         order = {"soon": 0, "active": 1, "none": 2, "expired": 3}

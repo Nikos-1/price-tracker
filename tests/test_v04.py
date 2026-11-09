@@ -46,19 +46,32 @@ def test_delete_product_removes_everything(tmp_path):
     assert not shot.exists() and not shot.parent.exists()
 
 
-def test_delete_purchased_product_keeps_shared_receipt(tmp_path):
+def test_delete_purchased_product_keeps_purchase(tmp_path):
     db = Database(tmp_path / "db.sqlite")
     c = create_app(db, FakeWorker(), tmp_path).test_client()
-    a, b, solo = db.create_product("PSU"), db.create_product("Κουζίνα"), db.create_product("Ποντίκι")
-    rid = _buy(c, a, also=[b])
-    rid2 = _buy(c, solo, "solo.pdf")
-    shared_file = tmp_path / db.get_receipt(rid)["file"]
-    solo_file = tmp_path / db.get_receipt(rid2)["file"]
-    assert shared_file.exists() and solo_file.exists()
-    c.delete(f"/api/products/{a}")
-    assert shared_file.exists() and db.get_receipt(rid)  # ανήκει και στην κουζίνα
-    c.delete(f"/api/products/{solo}")
-    assert not solo_file.exists() and db.get_receipt(rid2) is None
+    pid = db.create_product("PSU")
+    lid = db.add_listing(pid, "https://www.plaisio.gr/p/1")
+    shot = _shot(tmp_path, db, pid, lid, "a")
+    rid = _buy(c, pid)
+    receipt = tmp_path / db.get_receipt(rid)["file"]
+    assert c.delete(f"/api/products/{pid}").status_code == 200
+    p = db.get_product(pid)
+    assert p and p["purchased"] == 1 and p["purchased_shop"] == "Plaisio" and p["purchased_at"] == "2026-11-27"
+    assert p["receipt_id"] == rid and p["warranty_months"] == 24 and receipt.exists()
+    assert db.list_listings(pid, status=None) == [] and db.history() == [] and not shot.exists()
+    assert [w["id"] for w in c.get("/api/warranties").json] == [pid]
+
+
+def test_warranties_filter_by_category(tmp_path):
+    db = Database(tmp_path / "db.sqlite")
+    c = create_app(db, FakeWorker(), tmp_path).test_client()
+    a, b = db.create_product("PSU"), db.create_product("Κουζίνα")
+    _buy(c, a, also=[b])
+    cat = c.post("/api/categories", json={"name": "Κουζίνες"}).json["id"]
+    c.put(f"/api/products/{b}", json={"category_id": cat})
+    assert [w["id"] for w in c.get(f"/api/warranties?category={cat}").json] == [b]
+    assert [w["id"] for w in c.get("/api/warranties?category=0").json] == [a]
+    assert len(c.get("/api/warranties?category=all").json) == 2
 
 
 def test_delete_category_keeps_only_purchased(tmp_path):

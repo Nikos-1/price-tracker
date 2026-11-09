@@ -180,9 +180,9 @@ async function productAction(act, id, p) {
   if (act === "unbuy") return run(async () => { await api("POST", `/api/products/${id}/purchased`, { purchased: false }); refresh(); });
   if (act === "delete") {
     const extra = p.purchased
-      ? "<br><br>Το προϊόν έχει αγοραστεί: θα διαγραφούν και τα στοιχεία αγοράς και εγγύησης. Η απόδειξη διαγράφεται κι αυτή, εκτός αν αφορά και άλλα προϊόντα. Αν θέλεις μόνο να σταματήσει ο έλεγχος τιμής, δεν χρειάζεται διαγραφή: τα αγορασμένα δεν ελέγχονται."
-      : "";
-    if (await confirmBox("Διαγραφή προϊόντος", `Να διαγραφεί το «${esc(p.name)}» μαζί με τις τιμές, το ιστορικό και τα screenshots του;${extra}`, "Διαγραφή", true)) {
+      ? `Το «${esc(p.name)}» έχει αγοραστεί. Θα σβηστούν μόνο τα δεδομένα της αναζήτησης: καταστήματα, τιμές, ιστορικό και screenshots.<br><br>Το προϊόν μένει στα Αγορασμένα, με το κατάστημα και την ημερομηνία αγοράς, την εγγύηση και την απόδειξη.`
+      : `Να διαγραφεί το «${esc(p.name)}» μαζί με τις τιμές, το ιστορικό και τα screenshots του;`;
+    if (await confirmBox(p.purchased ? "Διαγραφή δεδομένων αναζήτησης" : "Διαγραφή προϊόντος", extra, "Διαγραφή", true)) {
       await run(() => api("DELETE", "/api/products/" + id));
       if (state.view === "detail") state.view = "list";
       refresh();
@@ -295,8 +295,14 @@ async function apiForm(url, fd) {
 }
 
 async function renderWarranties() {
-  const rows = await api("GET", "/api/warranties");
+  const rows = await api("GET", "/api/warranties?category=" + encodeURIComponent(state.category));
   const main = $("#main");
+  const catName = state.category === "all" ? "" : +state.category === 0 ? "Χωρίς κατηγορία"
+    : (state.categories.find((c) => String(c.id) === String(state.category)) || {}).name || "";
+  if (!rows.length && catName) {
+    main.innerHTML = `<div class="empty"><p>Δεν υπάρχουν αγορασμένα προϊόντα στην κατηγορία «${esc(catName)}».</p></div>`;
+    return;
+  }
   if (!rows.length) {
     main.innerHTML = `<div class="empty"><p>Δεν υπάρχουν αγορασμένα προϊόντα ακόμα.</p><p>Όταν πατήσεις <b>«✔ Αγοράστηκε»</b> σε ένα προϊόν, θα εμφανιστεί εδώ με την εγγύηση και την απόδειξή του.</p></div>`;
     return;
@@ -305,12 +311,12 @@ async function renderWarranties() {
     : r.warranty_state === "expired" ? `<span class="chip bad">Έληξε</span>`
     : r.warranty_state === "soon" ? `<span class="chip warn">Λήγει σε ${r.warranty_days_left} μέρες</span>`
     : `<span class="chip ok">Σε ισχύ, ${r.warranty_days_left} μέρες</span>`;
-  main.innerHTML = `<h2 style="margin-top:0">Εγγυήσεις και αποδείξεις</h2>
+  main.innerHTML = `<h2 style="margin-top:0">Εγγυήσεις και αποδείξεις${catName ? ` · ${esc(catName)}` : ""}</h2>
     <p class="hint">Οι αποδείξεις βρίσκονται και στα Έγγραφα\\PriceTracker\\Αποδείξεις. <button class="link" id="open-receipts">Άνοιγμα φακέλου</button></p>
     <div class="section"><table>
     <tr><th>Προϊόν</th><th>Αγορά</th><th>Εγγύηση</th><th>Λήξη</th><th>Απόδειξη</th><th></th></tr>
     ${rows.map((r) => `<tr>
-      <td><b>${esc(r.name)}</b><div class="hint">${esc(r.category_name || "Χωρίς κατηγορία")}</div></td>
+      <td><b>${esc(r.name)}</b><div><select class="cat-pick" data-cat-of="${r.id}" title="Κατηγορία">${categoryOptions(r.category_id, true)}</select></div></td>
       <td>${r.purchased_at ? new Date(r.purchased_at + "T00:00:00").toLocaleDateString("el-GR") : "–"}<div class="hint">${esc(r.purchased_shop || "")} ${r.purchased_price ? eur(r.purchased_price) : ""}</div></td>
       <td>${esc(r.warranty_label)}</td>
       <td>${r.warranty_end ? new Date(r.warranty_end + "T00:00:00").toLocaleDateString("el-GR") : "–"}<div>${chip(r)}</div></td>
@@ -325,6 +331,14 @@ async function renderWarranties() {
     if (!r.opened && r.url) window.open(r.url, "_blank");
   }));
   main.querySelectorAll("[data-up]").forEach((b) => b.onclick = () => uploadReceipt(rows.find((r) => r.id === +b.dataset.up), rows));
+  main.querySelectorAll("[data-cat-of]").forEach((sel) => sel.onchange = () => run(async () => {
+    const pid = +sel.dataset.catOf;
+    const prev = rows.find((r) => r.id === pid).category_id;
+    const assign = async (cid) => { await api("PUT", "/api/products/" + pid, { category_id: cid }); await refresh(); };
+    if (sel.value !== "__new") return assign(sel.value);
+    sel.value = prev ?? "";
+    categoryForm("Νέα κατηγορία", "", async (name) => { const r = await api("POST", "/api/categories", { name }); await api("PUT", "/api/products/" + pid, { category_id: r.id }); });
+  }));
   main.querySelectorAll("[data-ew]").forEach((b) => b.onclick = () => editWarranty(rows.find((r) => r.id === +b.dataset.ew)));
   main.querySelectorAll("[data-unbuy]").forEach((b) => b.onclick = async () => {
     if (await confirmBox("Ξανά παρακολούθηση", "Να ξαναρχίσει η παρακολούθηση τιμής; Τα στοιχεία αγοράς και εγγύησης θα σβηστούν (το αρχείο της απόδειξης μένει στον φάκελο).", "Ναι")) {
