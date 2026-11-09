@@ -6,11 +6,16 @@ from pathlib import Path
 
 from flask import Flask, abort, jsonify, request, send_file, send_from_directory
 
-from . import analysis, notifier
+import json
+import re
+
+from . import analysis, notifier, warranty
 from .export import export_xlsx
 from .shops import REGION_LABELS
 
 STATIC = Path(__file__).parent / "static"
+RECEIPT_TYPES = {".pdf", ".jpg", ".jpeg", ".png", ".webp", ".heic", ".gif", ".bmp", ".tif", ".tiff"}
+MAX_RECEIPT_BYTES = 30 * 1024 * 1024
 
 
 def _num(v):
@@ -23,9 +28,10 @@ def _num(v):
     return parse_price(v)
 
 
-def create_app(db, worker, data_dir: Path, shell=None):
+def create_app(db, worker, data_dir: Path, shell=None, updater=None):
     """shell: αντικείμενο με hide()/quit()/show() για το παράθυρο (desktop)."""
     app = Flask(__name__, static_folder=None)
+    app.config["MAX_CONTENT_LENGTH"] = MAX_RECEIPT_BYTES + 1024 * 1024
     app.config["JSON_AS_ASCII"] = False
     data_dir = Path(data_dir)
 
@@ -84,6 +90,10 @@ def create_app(db, worker, data_dir: Path, shell=None):
         s["cyber_monday"] = analysis.cyber_monday(y).isoformat()
         s["pending"] = worker.pending()
         s["data_dir"] = str(data_dir)
+        from . import __version__
+
+        s["version"] = __version__
+        s["update"] = updater.status() if updater is not None else {"supported": False}
         return jsonify(s)
 
     @app.post("/api/check")
@@ -186,7 +196,8 @@ def create_app(db, worker, data_dir: Path, shell=None):
             db.update_product(pid, purchased=1, purchased_at=b.get("date") or datetime.now().strftime("%Y-%m-%d"),
                               purchased_price=_num(b.get("price")), purchased_shop=b.get("shop"))
         else:
-            db.update_product(pid, purchased=0, purchased_at=None, purchased_price=None, purchased_shop=None)
+            db.update_product(pid, purchased=0, purchased_at=None, purchased_price=None, purchased_shop=None,
+                              receipt_id=None, warranty_months=None)
         return jsonify({"ok": True})
 
     @app.delete("/api/products/<int:pid>")
@@ -290,6 +301,157 @@ def create_app(db, worker, data_dir: Path, shell=None):
                                 "Αν διαβάζεις αυτό, οι ειδοποιήσεις email δουλεύουν.")
         except Exception as e:  # noqa: BLE001
             return err(f"Αποτυχία αποστολής: {e}")
+        return jsonify({"ok": True})
+
+    # ------------------------------------------------------------ αγορές, αποδείξεις, εγγυήσεις
+    def save_receipt(file_storage, shop, when):
+        name = file_storage.filename or "receipt"
+        ext = Path(name).suffix.lower()
+        if ext not in RECEIPT_TYPES:
+            raise ValueError("Η απόδειξη πρέπει να είναι PDF ή εικόνα (JPG, PNG κ.λπ.)")
+        safe = re.sub(r"[^\w\-.]+", "_", Path(name).stem, flags=re.UNICODE)[:60] or "receipt"
+        year = (when or datetime.now().strftime("%Y"))[:4]
+        rel = Path("receipts") / year / f"{datetime.now():%Y%m%d_%H%M%S}_{safe}{ext}"
+        dest = data_dir / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        file_storage.save(dest)
+        if dest.stat().st_size == 0:
+            dest.unlink()
+            raise ValueError("Το αρχείο της απόδειξης είναι κενό")
+        return db.create_receipt(rel.as_posix(), name, shop, when)
+
+    def _months(v):
+        if v in (None, "", "0", 0):
+            return None
+        m = int(float(v))
+        if not 0 < m <= 240:
+            raise ValueError("Η εγγύηση πρέπει να είναι από 1 μήνα έως 20 έτη")
+        return m
+
+    @app.post("/api/purchase")
+    def purchase():
+        """Καταχώριση αγοράς ενός ή περισσότερων προϊόντων (ίδια απόδειξη/τιμολόγιο).
+
+        multipart/form-data: items (JSON λίστα {product_id | name+category_id, price, warranty_months}),
+        date, shop, receipt (αρχείο, προαιρετικό).
+        """
+        form = request.form if request.form else (request.get_json(silent=True) or {})
+        try:
+            items = json.loads(form.get("items") or "[]") if isinstance(form.get("items"), str) else form.get("items") or []
+        except ValueError:
+            return err("Μη έγκυρα προϊόντα")
+        if not items:
+            return err("Διάλεξε τουλάχιστον ένα προϊόν")
+        when = form.get("date") or datetime.now().strftime("%Y-%m-%d")
+        shop = (form.get("shop") or "").strip() or None
+        receipt_id = None
+        f = request.files.get("receipt")
+        if f and f.filename:
+            receipt_id = save_receipt(f, shop, when)
+        elif form.get("receipt_id"):
+            receipt_id = int(form["receipt_id"])
+        done = []
+        for it in items:
+            pid = it.get("product_id")
+            if not pid:
+                name = (it.get("name") or "").strip()
+                if not name:
+                    continue
+                pid = db.create_product(name, _cat(it.get("category_id")))
+            fields = dict(purchased=1, purchased_at=when, purchased_price=_num(it.get("price")),
+                          purchased_shop=shop, warranty_months=_months(it.get("warranty_months")))
+            if receipt_id:
+                fields["receipt_id"] = receipt_id
+            db.update_product(int(pid), **fields)
+            done.append(int(pid))
+        return jsonify({"ok": True, "products": done, "receipt_id": receipt_id})
+
+    @app.post("/api/products/<int:pid>/receipt")
+    def attach_receipt(pid):
+        p = db.get_product(pid)
+        if not p:
+            abort(404)
+        f = request.files.get("receipt")
+        if not f or not f.filename:
+            return err("Δεν επιλέχθηκε αρχείο")
+        rid = save_receipt(f, p.get("purchased_shop"), p.get("purchased_at"))
+        others = [int(x) for x in request.form.getlist("also") if x.isdigit()]
+        for x in [pid] + others:
+            db.update_product(x, receipt_id=rid)
+        return jsonify({"ok": True, "receipt_id": rid})
+
+    @app.put("/api/products/<int:pid>/warranty")
+    def set_warranty(pid):
+        b = request.get_json() or {}
+        fields = {"warranty_months": _months(b.get("warranty_months"))}
+        if b.get("date"):
+            fields["purchased_at"] = b["date"]
+        if "price" in b:
+            fields["purchased_price"] = _num(b.get("price"))
+        if "shop" in b:
+            fields["purchased_shop"] = (b.get("shop") or "").strip() or None
+        db.update_product(pid, **fields)
+        return jsonify({"ok": True})
+
+    @app.get("/api/warranties")
+    def warranties():
+        out = []
+        for p in db.list_purchased():
+            w = warranty.warranty_info(p)
+            out.append({**p, **w, "warranty_label": warranty.months_label(p.get("warranty_months"))})
+        order = {"soon": 0, "active": 1, "none": 2, "expired": 3}
+        out.sort(key=lambda r: (order[r["warranty_state"]], r["warranty_end"] or "9999"))
+        return jsonify(out)
+
+    @app.get("/api/receipts/<int:rid>")
+    def receipt_info(rid):
+        r = db.get_receipt(rid)
+        if not r:
+            abort(404)
+        return jsonify({**r, "products": db.receipt_products(rid)})
+
+    @app.post("/api/receipts/<int:rid>/open")
+    def open_receipt(rid):
+        r = db.get_receipt(rid)
+        if not r:
+            abort(404)
+        path = data_dir / r["file"]
+        if shell is not None:
+            shell.open_path(path)
+            return jsonify({"ok": True, "opened": True})
+        return jsonify({"ok": True, "opened": False, "url": "/shots/" + r["file"]})
+
+    @app.delete("/api/receipts/<int:rid>")
+    def delete_receipt(rid):
+        r = db.get_receipt(rid)
+        if not r:
+            abort(404)
+        db.delete_receipt(rid)
+        try:
+            (data_dir / r["file"]).unlink()
+        except OSError:
+            pass
+        return jsonify({"ok": True})
+
+    # ------------------------------------------------------------ ενημερώσεις
+    @app.get("/api/update")
+    def update_status():
+        if updater is None:
+            return jsonify({"supported": False})
+        return jsonify(updater.status())
+
+    @app.post("/api/update/check")
+    def update_check():
+        if updater is None:
+            return err("Οι ενημερώσεις δεν είναι διαθέσιμες")
+        updater.check_async(force=True)
+        return jsonify({"ok": True})
+
+    @app.post("/api/update/install")
+    def update_install():
+        if updater is None:
+            return err("Οι ενημερώσεις δεν είναι διαθέσιμες")
+        updater.install_async()
         return jsonify({"ok": True})
 
     # ------------------------------------------------------------ export

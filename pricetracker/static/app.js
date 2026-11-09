@@ -174,20 +174,163 @@ function editProduct(p) {
         });
       } });
 }
-function markPurchased(p) {
+// ---------------------------------------------------------------- αγορά, απόδειξη, εγγύηση
+function warrantyInput(prefix, months = 24) {
+  const years = months && months % 12 === 0;
+  const n = months ? (years ? months / 12 : months) : 0;
+  return `<span class="warranty-in" data-w="${prefix}">
+    <input type="number" min="0" max="240" step="1" value="${n}" data-wn style="width:80px">
+    <select data-wu style="width:auto"><option value="12" ${years || !months ? "selected" : ""}>Έτη</option><option value="1" ${months && !years ? "selected" : ""}>Μήνες</option></select></span>`;
+}
+function warrantyMonths(el) {
+  const n = parseFloat($("[data-wn]", el).value || "0");
+  return Math.round(n * +$("[data-wu]", el).value) || 0;
+}
+const ACCEPT_RECEIPT = ".pdf,.jpg,.jpeg,.png,.webp,.heic,.gif,.bmp,.tif,.tiff,image/*,application/pdf";
+
+async function markPurchased(p) {
   const shops = [p.best?.GR, p.best?.EU].filter(Boolean);
   const best = shops.sort((a, b) => a.price - b.price)[0];
+  const others = (await api("GET", "/api/products?purchased=0&category=all")).filter((o) => o.id !== p.id);
+  const otherRows = others.map((o) => {
+    const ob = [o.best?.GR, o.best?.EU].filter(Boolean).sort((a, b) => a.price - b.price)[0];
+    return `<tr data-other="${o.id}"><td><label class="inline"><input type="checkbox" data-pick> ${esc(o.name)}</label></td>
+      <td><input data-price value="${ob ? ob.price : ""}" placeholder="τιμή €" style="width:100px"></td><td>${warrantyInput("o" + o.id)}</td></tr>`;
+  }).join("");
   modal(`<h2>Αγοράστηκε: ${esc(p.name)}</h2>
-    <p class="hint">Τα αγορασμένα προϊόντα σταματούν να ελέγχονται. Το ιστορικό κρατιέται.</p>
+    <p class="hint">Τα αγορασμένα προϊόντα σταματούν να ελέγχονται. Το ιστορικό τιμών μένει.</p>
     <div class="two"><div><label>Τιμή αγοράς (€)</label><input id="pp-price" value="${best ? best.price : ""}"></div>
-    <div><label>Ημερομηνία</label><input id="pp-date" type="date" value="${new Date().toISOString().slice(0, 10)}"></div></div>
-    <label>Κατάστημα</label><input id="pp-shop" value="${esc(best ? best.shop : "")}">
+    <div><label>Ημερομηνία αγοράς</label><input id="pp-date" type="date" value="${new Date().toISOString().slice(0, 10)}"></div></div>
+    <div class="two"><div><label>Κατάστημα</label><input id="pp-shop" value="${esc(best ? best.shop : "")}"></div>
+    <div><label>Εγγύηση</label>${warrantyInput("main", 24)}</div></div>
+    <div class="section"><h3>Θέλεις να ανεβάσεις την απόδειξη ή το τιμολόγιο;</h3>
+      <input type="file" id="pp-file" accept="${ACCEPT_RECEIPT}">
+      <div class="hint">PDF ή φωτογραφία, προαιρετικό. Αποθηκεύεται στον φάκελο της εφαρμογής, στο «receipts».</div>
+      <label class="inline" style="margin-top:12px"><input type="checkbox" id="pp-multi"> Η απόδειξη περιέχει κι άλλα προϊόντα</label>
+      <div id="pp-others" style="display:none">
+        ${others.length ? `<p class="hint">Διάλεξε όσα είναι στην ίδια απόδειξη. Το καθένα κρατάει τη δική του τιμή και εγγύηση.</p>
+          <table><tr><th>Προϊόν</th><th>Τιμή</th><th>Εγγύηση</th></tr>${otherRows}</table>` : ""}
+        <table id="pp-new"></table>
+        <button class="link" id="pp-add-new">+ Προϊόν της απόδειξης που δεν παρακολουθούσα</button>
+      </div>
+    </div>
     <div class="btns"><button data-close>Άκυρο</button><button class="primary" id="pp-save">✔ Αγοράστηκε</button></div>`,
-    { onMount: (m, close) => {
+    { wide: true, onMount: (m, close) => {
+        $("#pp-multi", m).onchange = () => ($("#pp-others", m).style.display = $("#pp-multi", m).checked ? "" : "none");
+        let nNew = 0;
+        $("#pp-add-new", m).onclick = () => {
+          nNew++;
+          const tr = document.createElement("tr");
+          tr.dataset.new = nNew;
+          tr.innerHTML = `<td><input data-name placeholder="Όνομα προϊόντος"></td><td><select data-cat>${categoryOptions(p.category_id)}</select></td>
+            <td><input data-price placeholder="τιμή €" style="width:100px"></td><td>${warrantyInput("n" + nNew)}</td>
+            <td><button class="small danger" data-rm>✕</button></td>`;
+          $("#pp-new", m).appendChild(tr);
+          $("[data-rm]", tr).onclick = () => tr.remove();
+          $("[data-name]", tr).focus();
+        };
+        m.querySelectorAll("tr[data-other] [data-price], tr[data-other] .warranty-in").forEach((el) =>
+          el.addEventListener("input", () => { el.closest("tr").querySelector("[data-pick]").checked = true; }));
         $("#pp-save", m).onclick = () => run(async () => {
-          await api("POST", `/api/products/${p.id}/purchased`, { purchased: true, price: $("#pp-price", m).value,
-            date: $("#pp-date", m).value, shop: $("#pp-shop", m).value });
-          close(); refresh(); toast("Σημειώθηκε ως αγορασμένο");
+          const items = [{ product_id: p.id, price: $("#pp-price", m).value, warranty_months: warrantyMonths($("[data-w=main]", m)) }];
+          if ($("#pp-multi", m).checked) {
+            m.querySelectorAll("tr[data-other]").forEach((tr) => {
+              if ($("[data-pick]", tr).checked) items.push({ product_id: +tr.dataset.other, price: $("[data-price]", tr).value, warranty_months: warrantyMonths($(".warranty-in", tr)) });
+            });
+            m.querySelectorAll("#pp-new tr").forEach((tr) => {
+              const name = $("[data-name]", tr).value.trim();
+              if (name) items.push({ name, category_id: $("[data-cat]", tr).value, price: $("[data-price]", tr).value, warranty_months: warrantyMonths($(".warranty-in", tr)) });
+            });
+          }
+          const fd = new FormData();
+          fd.append("items", JSON.stringify(items));
+          fd.append("date", $("#pp-date", m).value);
+          fd.append("shop", $("#pp-shop", m).value);
+          const f = $("#pp-file", m).files[0];
+          if (f) fd.append("receipt", f);
+          const r = await apiForm("/api/purchase", fd);
+          close(); refresh();
+          toast(r.products.length > 1 ? `Καταχωρήθηκαν ${r.products.length} προϊόντα ως αγορασμένα` : "Σημειώθηκε ως αγορασμένο");
+        });
+      } });
+}
+
+async function apiForm(url, fd) {
+  const r = await fetch(url, { method: "POST", body: fd });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || (r.status === 413 ? "Το αρχείο είναι πολύ μεγάλο (έως 30 MB)" : "Σφάλμα " + r.status));
+  return data;
+}
+
+async function renderWarranties() {
+  const rows = await api("GET", "/api/warranties");
+  const main = $("#main");
+  if (!rows.length) {
+    main.innerHTML = `<div class="empty"><p>Δεν υπάρχουν αγορασμένα προϊόντα ακόμα.</p><p>Όταν πατήσεις <b>«✔ Αγοράστηκε»</b> σε ένα προϊόν, θα εμφανιστεί εδώ με την εγγύηση και την απόδειξή του.</p></div>`;
+    return;
+  }
+  const chip = (r) => r.warranty_state === "none" ? `<span class="chip">Χωρίς στοιχεία</span>`
+    : r.warranty_state === "expired" ? `<span class="chip bad">Έληξε</span>`
+    : r.warranty_state === "soon" ? `<span class="chip warn">Λήγει σε ${r.warranty_days_left} μέρες</span>`
+    : `<span class="chip ok">Σε ισχύ, ${r.warranty_days_left} μέρες</span>`;
+  main.innerHTML = `<h2 style="margin-top:0">Εγγυήσεις και αποδείξεις</h2>
+    <div class="section"><table>
+    <tr><th>Προϊόν</th><th>Αγορά</th><th>Εγγύηση</th><th>Λήξη</th><th>Απόδειξη</th><th></th></tr>
+    ${rows.map((r) => `<tr>
+      <td><b>${esc(r.name)}</b><div class="hint">${esc(r.category_name || "Χωρίς κατηγορία")}</div></td>
+      <td>${r.purchased_at ? new Date(r.purchased_at + "T00:00:00").toLocaleDateString("el-GR") : "–"}<div class="hint">${esc(r.purchased_shop || "")} ${r.purchased_price ? eur(r.purchased_price) : ""}</div></td>
+      <td>${esc(r.warranty_label)}</td>
+      <td>${r.warranty_end ? new Date(r.warranty_end + "T00:00:00").toLocaleDateString("el-GR") : "–"}<div>${chip(r)}</div></td>
+      <td>${r.receipt_id ? `<button class="small" data-open-r="${r.receipt_id}">📄 Άνοιγμα</button><div class="hint">${esc(r.receipt_name || "")}</div>`
+        : `<button class="small" data-up="${r.id}">⬆ Ανέβασμα</button>`}</td>
+      <td style="white-space:nowrap"><button class="small" data-ew="${r.id}">✎</button>
+        <button class="small" data-unbuy="${r.id}" title="Ξανά παρακολούθηση τιμής">↺</button></td></tr>`).join("")}
+    </table></div>`;
+  main.querySelectorAll("[data-open-r]").forEach((b) => b.onclick = () => run(async () => {
+    const r = await api("POST", `/api/receipts/${b.dataset.openR}/open`);
+    if (!r.opened && r.url) window.open(r.url, "_blank");
+  }));
+  main.querySelectorAll("[data-up]").forEach((b) => b.onclick = () => uploadReceipt(rows.find((r) => r.id === +b.dataset.up), rows));
+  main.querySelectorAll("[data-ew]").forEach((b) => b.onclick = () => editWarranty(rows.find((r) => r.id === +b.dataset.ew)));
+  main.querySelectorAll("[data-unbuy]").forEach((b) => b.onclick = async () => {
+    if (await confirmBox("Ξανά παρακολούθηση", "Να ξαναρχίσει η παρακολούθηση τιμής; Τα στοιχεία αγοράς και εγγύησης θα σβηστούν (το αρχείο της απόδειξης μένει στον φάκελο).", "Ναι")) {
+      await run(() => api("POST", `/api/products/${b.dataset.unbuy}/purchased`, { purchased: false })); refresh();
+    }
+  });
+}
+
+function uploadReceipt(p, all) {
+  const others = all.filter((r) => r.id !== p.id && !r.receipt_id);
+  modal(`<h2>Απόδειξη για: ${esc(p.name)}</h2>
+    <input type="file" id="ur-file" accept="${ACCEPT_RECEIPT}">
+    ${others.length ? `<label style="margin-top:14px">Η ίδια απόδειξη αφορά και:</label>
+      ${others.map((o) => `<label class="inline"><input type="checkbox" value="${o.id}" data-also> ${esc(o.name)} <span class="hint">${esc(o.purchased_at || "")}</span></label>`).join("")}` : ""}
+    <div class="btns"><button data-close>Άκυρο</button><button class="primary" id="ur-save">Ανέβασμα</button></div>`,
+    { onMount: (m, close) => {
+        $("#ur-save", m).onclick = () => run(async () => {
+          const f = $("#ur-file", m).files[0];
+          if (!f) throw new Error("Διάλεξε αρχείο");
+          const fd = new FormData();
+          fd.append("receipt", f);
+          m.querySelectorAll("[data-also]:checked").forEach((c) => fd.append("also", c.value));
+          await apiForm(`/api/products/${p.id}/receipt`, fd);
+          close(); render(); toast("Η απόδειξη αποθηκεύτηκε");
+        });
+      } });
+}
+
+function editWarranty(p) {
+  modal(`<h2>Στοιχεία αγοράς: ${esc(p.name)}</h2>
+    <div class="two"><div><label>Ημερομηνία αγοράς</label><input id="ew-date" type="date" value="${esc(p.purchased_at || "")}"></div>
+    <div><label>Εγγύηση</label>${warrantyInput("ew", p.warranty_months || 0)}</div></div>
+    <div class="two"><div><label>Τιμή (€)</label><input id="ew-price" value="${p.purchased_price ?? ""}"></div>
+    <div><label>Κατάστημα</label><input id="ew-shop" value="${esc(p.purchased_shop || "")}"></div></div>
+    <div class="btns"><button data-close>Άκυρο</button><button class="primary" id="ew-save">Αποθήκευση</button></div>`,
+    { onMount: (m, close) => {
+        $("#ew-save", m).onclick = () => run(async () => {
+          await api("PUT", `/api/products/${p.id}/warranty`, { date: $("#ew-date", m).value, warranty_months: warrantyMonths($("[data-w=ew]", m)),
+            price: $("#ew-price", m).value, shop: $("#ew-shop", m).value });
+          close(); render();
         });
       } });
 }
@@ -390,6 +533,10 @@ async function openSettings() {
       <label>Όταν πατάω το Χ</label><select id="s-close"><option value="ask" ${s.close_action === "ask" ? "selected" : ""}>Να ρωτάει</option><option value="tray" ${s.close_action === "tray" ? "selected" : ""}>Να μένει στο system tray</option><option value="exit" ${s.close_action === "exit" ? "selected" : ""}>Να κλείνει</option></select>
       <label class="inline"><input type="checkbox" id="s-auto" ${s.start_with_windows ? "checked" : ""}> Εκκίνηση μαζί με τα Windows (στο system tray)</label>
       <p class="hint">Φάκελος δεδομένων: <code>${esc(state.status.data_dir || "")}</code> <button class="link" id="s-folder">Άνοιγμα</button></p>
+      <label class="inline"><input type="checkbox" id="s-autoupd" ${s.auto_update ? "checked" : ""}> Αυτόματη ενημέρωση της εφαρμογής όταν βγαίνει νέα έκδοση</label>
+      <p class="hint">Έκδοση <b>${esc(state.status.version || "")}</b> · <span id="s-upd-msg">${esc(state.status.update?.message || "")}</span>
+        <button class="link" id="s-upd-check">Έλεγχος τώρα</button> <button class="link" id="s-upd-install" style="display:${state.status.update?.available ? "" : "none"}">Εγκατάσταση τώρα</button></p>
+      <label>Υπενθύμιση πριν λήξει μια εγγύηση (μέρες, 0 = όχι)</label><input id="s-wrem" type="number" min="0" max="365" value="${s.warranty_reminder_days ?? 30}" style="width:120px">
     </div>
     <div class="section"><h3>Καταστήματα</h3>
       <p class="hint">Η «Αναζήτηση» χρησιμοποιεί το URL αναζήτησης κάθε καταστήματος ({q} = το προϊόν). Καταστήματα από links που προσθέτεις μπαίνουν εδώ αυτόματα.</p>
@@ -407,6 +554,16 @@ async function openSettings() {
         };
         $("#s-prov", m).onchange = syncProv; syncProv();
         $("#s-folder", m).onclick = () => api("POST", "/api/open-folder", {});
+        $("#s-upd-check", m).onclick = () => run(async () => {
+          await api("POST", "/api/update/check");
+          $("#s-upd-msg", m).textContent = "Έλεγχος…";
+          setTimeout(async () => {
+            const u = await api("GET", "/api/update");
+            $("#s-upd-msg", m).textContent = u.message || "";
+            $("#s-upd-install", m).style.display = u.available && u.supported ? "" : "none";
+          }, 4000);
+        });
+        $("#s-upd-install", m).onclick = () => run(async () => { await api("POST", "/api/update/install"); toast("Η ενημέρωση ξεκίνησε. Η εφαρμογή θα ξανανοίξει μόνη της.", 8000); });
         const collect = () => {
           const body = {
             check_interval_hours: $("#s-int", m).value, bf_interval_hours: $("#s-bfint", m).value,
@@ -416,6 +573,7 @@ async function openSettings() {
             email_to: $("#s-to", m).value.trim(), smtp_host: $("#s-host", m).value.trim(), smtp_port: $("#s-port", m).value,
             notify_back_in_stock: $("#s-n1", m).checked, notify_target_price: $("#s-n2", m).checked, notify_new_low: $("#s-n3", m).checked,
             close_action: $("#s-close", m).value, start_with_windows: $("#s-auto", m).checked,
+            auto_update: $("#s-autoupd", m).checked, warranty_reminder_days: +$("#s-wrem", m).value || 0,
           };
           if ($("#s-pass", m).value) body.smtp_password = $("#s-pass", m).value.replace(/\s+/g, "");
           return body;
@@ -451,6 +609,9 @@ async function pollStatus() {
     parts.push(`Τελευταίος έλεγχος: ${s.last_run ? fmtDate(s.last_run) : "–"}`);
     if (s.next_run) parts.push(`Επόμενος: ${fmtDate(s.next_run)}`);
     parts.push(`κάθε ${String(s.interval_hours).replace(".", ",")} ώρ.${s.bf_mode ? " (Black Friday)" : ""}`);
+    const u = s.update || {};
+    if (["downloading", "waiting", "installing"].includes(u.state)) parts.unshift(`<span class="run">⬆ ${esc(u.message)}</span>`);
+    else if (u.available && !u.supported) parts.push(`<span class="run">Νέα έκδοση ${esc(u.latest)}</span>`);
     $("#status").innerHTML = parts.join(" · ");
     const bf = new Date(s.black_friday + "T00:00:00"), cm = new Date(s.cyber_monday + "T00:00:00");
     const days = Math.ceil((bf - new Date()) / 86400000);
@@ -477,7 +638,11 @@ window.showCloseDialog = function () {
 };
 
 async function render() {
-  await run(async () => { state.view === "detail" ? await renderDetail() : await renderList(); });
+  await run(async () => {
+    if (state.view === "detail") await renderDetail();
+    else if (state.purchased === "warranty") await renderWarranties();
+    else await renderList();
+  });
 }
 async function refresh() { await run(loadCategories); await render(); }
 

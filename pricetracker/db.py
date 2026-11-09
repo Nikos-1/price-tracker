@@ -72,10 +72,26 @@ CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT
 );
+CREATE TABLE IF NOT EXISTS receipts (
+    id INTEGER PRIMARY KEY,
+    file TEXT NOT NULL,              -- σχετική διαδρομή μέσα στον φάκελο δεδομένων
+    original_name TEXT,
+    shop TEXT,
+    date TEXT,
+    created_at TEXT NOT NULL
+);
 """
+
+# Στήλες που προστέθηκαν σε νεότερες εκδόσεις (για βάσεις που υπάρχουν ήδη)
+MIGRATIONS = {
+    "products": [("receipt_id", "INTEGER REFERENCES receipts(id) ON DELETE SET NULL"),
+                 ("warranty_months", "INTEGER")],
+}
 
 DEFAULT_SETTINGS = {
     "check_interval_hours": 6,
+    "auto_update": True,
+    "warranty_reminder_days": 30,
     "bf_interval_hours": 1,
     "bf_window_auto": True,          # 20/11 – 2/12 κάθε χρονιάς
     "bf_start": "",                  # MM-DD αν bf_window_auto = False
@@ -107,7 +123,16 @@ class Database:
         self._lock = threading.RLock()
         with self.conn() as c:
             c.executescript(SCHEMA)
+            self._migrate(c)
             self._seed(c)
+
+    @staticmethod
+    def _migrate(c):
+        for table, cols in MIGRATIONS.items():
+            have = {r["name"] for r in c.execute(f"PRAGMA table_info({table})")}
+            for name, decl in cols:
+                if name not in have:
+                    c.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
 
     @contextmanager
     def conn(self):
@@ -241,7 +266,8 @@ class Database:
 
     def update_product(self, product_id: int, **fields):
         allowed = {"name", "category_id", "target_price", "notes", "ean", "mpn", "brand", "image_url",
-                   "purchased", "purchased_at", "purchased_price", "purchased_shop"}
+                   "purchased", "purchased_at", "purchased_price", "purchased_shop", "receipt_id",
+                   "warranty_months"}
         fields = {k: v for k, v in fields.items() if k in allowed}
         if not fields:
             return
@@ -363,3 +389,35 @@ class Database:
         q += " ORDER BY h.checked_at"
         with self.conn() as c:
             return [dict(r) for r in c.execute(q, args)]
+
+    # ---------- αποδείξεις ----------
+    def create_receipt(self, file: str, original_name: str | None, shop: str | None, date: str | None) -> int:
+        with self.conn() as c:
+            cur = c.execute("INSERT INTO receipts(file, original_name, shop, date, created_at) VALUES(?,?,?,?,?)",
+                            (file, original_name, shop, date, now_iso()))
+            return cur.lastrowid
+
+    def get_receipt(self, receipt_id):
+        with self.conn() as c:
+            r = c.execute("SELECT * FROM receipts WHERE id=?", (receipt_id,)).fetchone()
+        return dict(r) if r else None
+
+    def receipt_products(self, receipt_id):
+        with self.conn() as c:
+            return [dict(r) for r in c.execute("SELECT id, name FROM products WHERE receipt_id=? ORDER BY name",
+                                               (receipt_id,))]
+
+    def delete_receipt(self, receipt_id):
+        with self.conn() as c:
+            c.execute("UPDATE products SET receipt_id=NULL WHERE receipt_id=?", (receipt_id,))
+            c.execute("DELETE FROM receipts WHERE id=?", (receipt_id,))
+
+    def list_purchased(self):
+        with self.conn() as c:
+            rows = c.execute(
+                """SELECT p.*, c.name AS category_name, r.file AS receipt_file, r.original_name AS receipt_name
+                   FROM products p LEFT JOIN categories c ON c.id = p.category_id
+                   LEFT JOIN receipts r ON r.id = p.receipt_id
+                   WHERE p.purchased = 1 ORDER BY p.purchased_at DESC, p.name"""
+            ).fetchall()
+        return [dict(r) for r in rows]

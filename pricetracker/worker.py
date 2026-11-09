@@ -69,7 +69,14 @@ class Worker:
     # ------------------------------------------------------------ loops
     def _scheduler(self):
         last = time.time()
+        last_warranty = 0.0
         while not self._stop.wait(30):
+            if time.time() - last_warranty > 6 * 3600:
+                last_warranty = time.time()
+                try:
+                    self.check_warranties()
+                except Exception:  # noqa: BLE001
+                    log.exception("warranty check failed")
             settings = self.db.get_settings()
             hours = analysis.current_interval_hours(settings)
             base = self.status.get("last_run_ts") or last
@@ -224,6 +231,43 @@ class Worker:
                 self._log(f"Στάλθηκε email: {subject}")
             except Exception as e:  # noqa: BLE001
                 self._log(f"Αποτυχία email: {e}")
+
+    def check_warranties(self, today=None):
+        """Ειδοποίηση μία φορά όταν πλησιάζει η λήξη μιας εγγύησης."""
+        from . import warranty
+
+        settings = self.db.get_settings()
+        days = int(settings.get("warranty_reminder_days") or 0)
+        if days <= 0:
+            return []
+        sent = set(settings.get("warranty_notified") or [])
+        due = []
+        for p in self.db.list_purchased():
+            w = warranty.warranty_info(p, today)
+            key = f"{p['id']}:{w['warranty_end']}"
+            if w["warranty_end"] and 0 <= w["warranty_days_left"] <= days and key not in sent:
+                due.append((p, w, key))
+        if not due:
+            return []
+        lines = [f"• {p['name']}: η εγγύηση λήγει στις {w['warranty_end']} (σε {w['warranty_days_left']} μέρες)"
+                 for p, w, _ in due]
+        subject = (f"[Price Tracker] Λήγει η εγγύηση: {due[0][0]['name']}" if len(due) == 1
+                   else f"[Price Tracker] Λήγουν {len(due)} εγγυήσεις")
+        text = "Πλησιάζει η λήξη εγγύησης για:\n\n" + "\n".join(lines)
+        if self.notify_callback:
+            try:
+                self.notify_callback(subject.replace("[Price Tracker] ", ""))
+            except Exception:  # noqa: BLE001
+                pass
+        if settings.get("email_enabled"):
+            try:
+                pw = notifier.load_password(self.db, settings.get("smtp_user", ""))
+                notifier.send_email(settings, pw, subject, text)
+            except Exception as e:  # noqa: BLE001
+                self._log(f"Αποτυχία email εγγύησης: {e}")
+        self.db.set_settings({"warranty_notified": sorted(sent | {k for _, _, k in due})})
+        self._log(subject.replace("[Price Tracker] ", ""))
+        return due
 
     def new_product(self, product_id: int, search: bool = True):
         listings = self.db.list_listings(product_id=product_id, status="active")
