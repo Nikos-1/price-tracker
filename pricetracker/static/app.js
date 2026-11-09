@@ -149,7 +149,7 @@ async function renderList() {
 }
 function priceBox(label, b) {
   return `<div class="price-box"><div class="lbl">${label}</div>
-    <div class="val">${b ? eur(b.price) : "–"}</div><div class="shop">${b ? esc(b.shop) : "δεν βρέθηκε διαθέσιμο"}</div></div>`;
+    <div class="val">${b ? eur(b.price) : "–"}</div><div class="shop">${b ? esc(b.shop) + (b.country && b.country !== "Ελλάδα" ? " · " + esc(b.country) : "") : "δεν βρέθηκε διαθέσιμο"}</div></div>`;
 }
 function cardHtml(p) {
   const chips = [];
@@ -163,7 +163,7 @@ function cardHtml(p) {
   return `<div class="card">
     <div class="title" data-open="${p.id}">${p.image_url ? `<img src="${esc(p.image_url)}" alt="" onerror="this.remove()">` : ""}<span>${esc(p.name)}</span></div>
     <div class="meta">${esc(p.category_name || "Χωρίς κατηγορία")} · ${p.listing_count} καταστήματα · Χαμηλότερη ποτέ: ${eur(p.min_ever)}</div>
-    <div class="prices">${priceBox("Ελλάδα", p.best.GR)}${priceBox("Ε.Ε.", p.best.EU)}</div>
+    <div class="prices${p.best.OTHER ? " three" : ""}">${priceBox("Ελλάδα", p.best.GR)}${priceBox("Ε.Ε.", p.best.EU)}${p.best.OTHER ? priceBox("Εκτός Ε.Ε.", p.best.OTHER) : ""}</div>
     <div class="row">${chips.join("")}</div>
     <div class="meta">Τελευταίος έλεγχος: ${fmtDate(p.last_checked)}</div>
     <div class="row">
@@ -417,7 +417,7 @@ async function renderDetail() {
   const groups = { GR: [], EU: [], OTHER: [] };
   p.listings.forEach((l) => (groups[l.region] || groups.OTHER).push(l));
   const listingRows = (arr) => arr.map((l) => `<tr>
-      <td><a href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.shop_name)}</a><div class="hint">${esc((l.title || "").slice(0, 90))}</div></td>
+      <td><a href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.shop_name)}</a>${l.country_label && l.region !== "GR" ? ` <span class="chip">${esc(l.country_label)}</span>` : ""}<div class="hint">${esc((l.title || "").slice(0, 90))}</div></td>
       <td class="num"><b>${eur(l.last_price, l.last_currency)}</b></td>
       <td>${l.last_in_stock == null ? "–" : l.last_in_stock ? '<span class="chip ok">Ναι</span>' : '<span class="chip bad">Όχι</span>'}
           ${l.last_error ? `<div class="err">${esc(l.last_error)}</div>` : ""}</td>
@@ -433,7 +433,7 @@ async function renderDetail() {
   const cands = p.candidates.length ? `<div class="section"><h3>Πιθανές αντιστοιχίες σε άλλα καταστήματα (${p.candidates.length})</h3>
       <p class="hint">Η εφαρμογή τα βρήκε με αναζήτηση. Πάτα ✔ αν είναι το ίδιο προϊόν (ίδιο μοντέλο), αλλιώς ✕.</p><table>
       <tr><th>Κατάστημα</th><th>Τίτλος</th><th></th></tr>
-      ${p.candidates.map((c) => `<tr><td>${esc(c.shop_name)} <span class="chip">${esc(c.region_label)}</span></td>
+      ${p.candidates.map((c) => `<tr><td>${esc(c.shop_name)} <span class="chip">${esc(c.country_label || c.region_label)}</span></td>
         <td><a href="${esc(c.url)}" target="_blank" rel="noopener">${esc(c.title || c.url)}</a></td>
         <td style="white-space:nowrap"><button class="small primary" data-acc="${c.id}">✔ Είναι αυτό</button> <button class="small" data-rej="${c.id}">✕</button></td></tr>`).join("")}
       </table></div>` : "";
@@ -453,14 +453,14 @@ async function renderDetail() {
       <button data-act="${p.purchased ? "unbuy" : "buy"}">${p.purchased ? "↺ Ξανά παρακολούθηση" : "✔ Αγοράστηκε"}</button>
       <button class="danger" data-act="delete">🗑 Διαγραφή</button>
     </div>
-    <div class="prices" style="margin-top:12px;max-width:520px">${priceBox("Καλύτερη τιμή Ελλάδα", p.best.GR)}${priceBox("Καλύτερη τιμή Ε.Ε.", p.best.EU)}</div>
+    <div class="prices${p.best.OTHER ? " three" : ""}" style="margin-top:12px;max-width:${p.best.OTHER ? 780 : 520}px">${priceBox("Καλύτερη τιμή Ελλάδα", p.best.GR)}${priceBox("Καλύτερη τιμή Ε.Ε.", p.best.EU)}${p.best.OTHER ? priceBox("Καλύτερη τιμή εκτός Ε.Ε.", p.best.OTHER) : ""}</div>
     ${cands}
     <div class="section"><h3>Εξέλιξη τιμής</h3>
       ${p.history.some((h) => h.price) ? `<div class="chart-wrap"><canvas id="chart"></canvas></div>
       <p class="hint">Οι κάθετες γραμμές δείχνουν Black Friday / Cyber Monday. Μια προσφορά είναι πραγματική αν η τιμή είναι κάτω από τη χαμηλότερη των προηγούμενων εβδομάδων, όχι μόνο κάτω από μια «αρχική» τιμή.</p>`
       : `<p class="hint">Δεν υπάρχουν ακόμα τιμές. Ο πρώτος έλεγχος μπορεί να πάρει λίγα λεπτά.</p>`}
     </div>
-    ${table("🇬🇷 Ελλάδα", groups.GR)}${table("🇪🇺 Ευρωπαϊκή Ένωση", groups.EU)}${table("Άλλα", groups.OTHER)}
+    ${table("🇬🇷 Ελλάδα", groups.GR)}${table("🇪🇺 Ευρωπαϊκή Ένωση", groups.EU)}${table("🌍 Εκτός Ε.Ε. <span class=\"hint\">· η τιμή δεν περιλαμβάνει πιθανούς δασμούς και ΦΠΑ στο τελωνείο</span>", groups.OTHER)}
     ${shotsRows.length ? `<div class="section"><h3>Screenshots (αρχείο αναφοράς)</h3><table>
       <tr><th>Ημερομηνία</th><th>Κατάστημα</th><th>Τιμή</th><th></th></tr>
       ${shotsRows.map((h) => `<tr><td>${fmtDate(h.checked_at)}</td><td>${esc(h.shop_name)}</td><td class="num">${eur(h.price, h.currency)}</td>
@@ -557,17 +557,30 @@ async function openSettings() {
 async function renderSettings() {
   const s = await api("GET", "/api/settings");
   const shops = await api("GET", "/api/shops");
-  const regionSel = (r, attr = 'data-f="region"') => `<select ${attr}><option value="GR" ${r === "GR" ? "selected" : ""}>Ελλάδα</option><option value="EU" ${r === "EU" ? "selected" : ""}>Ε.Ε.</option><option value="OTHER" ${r === "OTHER" ? "selected" : ""}>Άλλο</option></select>`;
+  const countries = await api("GET", "/api/countries");
+  const countrySel = (c, attr = 'data-f="country"', auto = false) => {
+    const grp = (region, label) => `<optgroup label="${label}">` + countries.filter((x) => x.region === region && x.code)
+      .sort((a, b) => a.name.localeCompare(b.name, "el")).map((x) => `<option value="${x.code}" ${x.code === c ? "selected" : ""}>${esc(x.name)}</option>`).join("") + "</optgroup>";
+    return `<select ${attr}>${auto ? `<option value="auto" selected>Αυτόματα, από τη διεύθυνση</option>` : ""}` +
+      grp("GR", "Ελλάδα") + grp("EU", "Ευρωπαϊκή Ένωση") + grp("OTHER", "Εκτός Ε.Ε.") +
+      `<option value="" ${!auto && !c ? "selected" : ""}>Άγνωστη</option></select>`;
+  };
+  const REGION_TITLES = { GR: "Ελλάδα", EU: "Ευρωπαϊκή Ένωση", OTHER: "Εκτός Ε.Ε. (πιθανοί δασμοί και ΦΠΑ στο τελωνείο)" };
   const shopRow = (sh) => `<tr data-shop="${sh.id}" data-used="${sh.used || 0}">
     <td style="text-align:center"><input type="checkbox" data-sel title="Επιλογή για διαγραφή"></td>
     <td><input data-f="name" value="${esc(sh.name)}"></td>
     <td class="hint">${esc(sh.domain)}${sh.used ? `<div>${sh.used} ${sh.used === 1 ? "προϊόν" : "προϊόντα"}</div>` : ""}</td>
-    <td>${regionSel(sh.region)}</td>
+    <td>${countrySel(sh.country || "")}</td>
     <td><input data-f="search_url" value="${esc(sh.search_url || "")}" placeholder="https://.../search?q={q}">
       <div class="hint" data-detect-msg></div>${sh.search_url ? "" : `<button class="link" data-detect="${sh.id}">🔍 Αυτόματη εύρεση</button>`}</td>
     <td style="text-align:center"><input type="checkbox" data-f="search_enabled" ${sh.search_enabled ? "checked" : ""}></td>
     <td><button class="small danger" data-del-shop="${sh.id}" title="Διαγραφή καταστήματος">🗑</button></td></tr>`;
-  const shopRows = shops.map(shopRow).join("");
+  let lastRegion = null;
+  const shopRows = shops.map((sh) => {
+    const head = sh.region !== lastRegion ? `<tr class="group-row"><td colspan="7">${esc(REGION_TITLES[sh.region] || sh.region)}</td></tr>` : "";
+    lastRegion = sh.region;
+    return head + shopRow(sh);
+  }).join("");
   const main = $("#main");
   main.innerHTML = `<div class="page settings-page">
     <div class="page-head"><button id="s-back">← Πίσω</button><h2>Ρυθμίσεις</h2><span class="grow"></span>
@@ -577,6 +590,7 @@ async function renderSettings() {
       <div><label>Κάθε πόσες ώρες στην περίοδο Black Friday</label><input id="s-bfint" type="number" min="0.25" step="0.25" value="${s.bf_interval_hours}"></div></div>
       <label class="inline"><input type="checkbox" id="s-bfauto" ${s.bf_window_auto ? "checked" : ""}> Περίοδος Black Friday αυτόματα: 20/11 έως 2/12</label>
       <div class="two" id="s-bfdates"><div><label>Αρχή (ΜΜ-ΗΗ)</label><input id="s-bfs" value="${esc(s.bf_start || "11-20")}"></div><div><label>Τέλος (ΜΜ-ΗΗ)</label><input id="s-bfe" value="${esc(s.bf_end || "12-02")}"></div></div>
+      <label class="inline"><input type="checkbox" id="s-research" ${s.research_daily ? "checked" : ""}> Μία φορά τη μέρα αναζήτηση των προϊόντων και στα καταστήματα που δεν τα έχουν ακόμα</label>
       <label>Screenshots</label><select id="s-shot"><option value="changes" ${s.screenshot_mode === "changes" ? "selected" : ""}>Όταν αλλάζει τιμή ή διαθεσιμότητα (και πάντα στην περίοδο Black Friday)</option><option value="always" ${s.screenshot_mode === "always" ? "selected" : ""}>Σε κάθε έλεγχο</option></select>
       <label>Παράθυρο browser κατά τους ελέγχους</label><select id="s-bmode">
         <option value="auto" ${s.browser_mode === "auto" ? "selected" : ""}>Κρυφό· ανοίγει μόνο όταν χρειάζεται ενέργειά σου (π.χ. captcha)</option>
@@ -594,6 +608,7 @@ async function renderSettings() {
       <label class="inline"><input type="checkbox" id="s-n1" ${s.notify_back_in_stock ? "checked" : ""}> Όταν ένα προϊόν γίνει διαθέσιμο</label>
       <label class="inline"><input type="checkbox" id="s-n2" ${s.notify_target_price ? "checked" : ""}> Όταν φτάσει την τιμή-στόχο</label>
       <label class="inline"><input type="checkbox" id="s-n3" ${s.notify_new_low ? "checked" : ""}> Όταν βρεθεί νέα χαμηλότερη τιμή</label>
+      <label class="inline"><input type="checkbox" id="s-n4" ${s.notify_new_shop ? "checked" : ""}> Όταν ένα προϊόν βρεθεί σε νέο κατάστημα (από την ημερήσια αναζήτηση)</label>
       <button id="s-test" style="margin-top:8px">Αποστολή δοκιμαστικού email</button>
     </div>
     <div class="section"><h3>Εφαρμογή</h3>
@@ -608,11 +623,11 @@ async function renderSettings() {
     <div class="section"><h3>Καταστήματα</h3>
       <p class="hint">Η «Αναζήτηση» χρησιμοποιεί το URL αναζήτησης κάθε καταστήματος ({q} = το προϊόν). Καταστήματα από links που προσθέτεις μπαίνουν εδώ αυτόματα.</p>
       <div class="row-btns" style="margin-bottom:8px"><button class="danger" id="s-del-sel" disabled>🗑 Διαγραφή επιλεγμένων</button></div>
-      <table id="s-shops"><tr><th style="text-align:center;width:36px"><input type="checkbox" id="s-sel-all" title="Επιλογή όλων"></th><th>Όνομα</th><th>Διεύθυνση</th><th>Περιοχή</th><th>URL αναζήτησης</th><th>Αναζήτηση</th><th></th></tr>${shopRows}</table>
+      <table id="s-shops"><tr><th style="text-align:center;width:36px"><input type="checkbox" id="s-sel-all" title="Επιλογή όλων"></th><th>Όνομα</th><th>Διεύθυνση</th><th>Χώρα</th><th>URL αναζήτησης</th><th>Αναζήτηση</th><th></th></tr>${shopRows}</table>
       <h3 style="margin-top:16px">Προσθήκη καταστήματος</h3>
       <div class="two"><div><label>Όνομα</label><input id="ns-name" placeholder="π.χ. Germanos"></div>
         <div><label>Διεύθυνση (site)</label><input id="ns-domain" placeholder="π.χ. www.germanos.gr"></div></div>
-      <div class="two"><div><label>Περιοχή</label>${regionSel("GR", 'id="ns-region"')}</div>
+      <div class="two"><div><label>Χώρα</label>${countrySel("", 'id="ns-country"', true)}</div>
         <div><label>URL αναζήτησης (προαιρετικό: αν το αφήσεις κενό, το ψάχνω μόνος μου)</label><input id="ns-url" placeholder="https://www.germanos.gr/search?q={q}"></div></div>
       <p class="hint">Για το URL αναζήτησης: κάνε μια αναζήτηση στο site, αντίγραψε τη διεύθυνση και βάλε {q} στη θέση της λέξης που έψαξες.</p>
       <button id="ns-add">+ Προσθήκη καταστήματος</button>
@@ -706,7 +721,8 @@ async function renderSettings() {
           toast(rows.length === 1 ? "Το κατάστημα διαγράφηκε" : `Διαγράφηκαν ${rows.length} καταστήματα`);
         });
         $("#ns-add", m).onclick = () => run(async () => {
-          const body = { name: $("#ns-name", m).value, domain: $("#ns-domain", m).value, region: $("#ns-region", m).value, search_url: $("#ns-url", m).value };
+          const body = { name: $("#ns-name", m).value, domain: $("#ns-domain", m).value, search_url: $("#ns-url", m).value };
+          if ($("#ns-country", m).value !== "auto") body.country = $("#ns-country", m).value;
           const r = await api("POST", "/api/shops", body);
           const sh = (await api("GET", "/api/shops")).find((x) => x.id === r.id);
           const tmp = document.createElement("tbody");
@@ -737,6 +753,7 @@ async function renderSettings() {
             email_enabled: $("#s-email", m).checked, smtp_provider: $("#s-prov", m).value, smtp_user: $("#s-user", m).value.trim(),
             email_to: $("#s-to", m).value.trim(), smtp_host: $("#s-host", m).value.trim(), smtp_port: $("#s-port", m).value,
             notify_back_in_stock: $("#s-n1", m).checked, notify_target_price: $("#s-n2", m).checked, notify_new_low: $("#s-n3", m).checked,
+            notify_new_shop: $("#s-n4", m).checked, research_daily: $("#s-research", m).checked,
             close_action: $("#s-close", m).value, start_with_windows: $("#s-auto", m).checked,
             auto_update: $("#s-autoupd", m).checked, warranty_reminder_days: +$("#s-wrem", m).value || 0,
           };
@@ -746,7 +763,7 @@ async function renderSettings() {
         const saveAll = async () => {
           await api("PUT", "/api/settings", collect());
           for (const tr of m.querySelectorAll("tr[data-shop]")) {
-            await api("PUT", "/api/shops/" + tr.dataset.shop, { name: $("[data-f=name]", tr).value, region: $("[data-f=region]", tr).value,
+            await api("PUT", "/api/shops/" + tr.dataset.shop, { name: $("[data-f=name]", tr).value, country: $("[data-f=country]", tr).value,
               search_url: $("[data-f=search_url]", tr).value, search_enabled: $("[data-f=search_enabled]", tr).checked });
           }
         };

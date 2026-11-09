@@ -14,7 +14,7 @@ from . import analysis, notifier, receipts, warranty
 from . import __version__
 from .db import DEFAULT_SETTINGS
 from .export import export_settings_xlsx, export_xlsx
-from .shops import REGION_LABELS
+from .shops import COUNTRIES, REGION_LABELS, country_label, guess_country, region_of_country
 
 STATIC = Path(__file__).parent / "static"
 RECEIPT_TYPES = {".pdf", ".jpg", ".jpeg", ".png", ".webp", ".heic", ".gif", ".bmp", ".tif", ".tiff"}
@@ -126,12 +126,13 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None):
         listings = db.list_listings(product_id=p["id"], status="active")
         cand = db.list_listings(product_id=p["id"], status="candidate")
         best = {}
-        for region in ("GR", "EU"):
+        for region in ("GR", "EU", "OTHER"):
             avail = [l for l in listings if l.get("region") == region and l.get("last_price")
                      and l.get("last_in_stock")]
             if avail:
                 b = min(avail, key=lambda l: l["last_price"])
-                best[region] = {"price": b["last_price"], "shop": b["shop_name"], "url": b["url"]}
+                best[region] = {"price": b["last_price"], "shop": b["shop_name"], "url": b["url"],
+                                "country": country_label(b.get("country"))}
         hist = db.history(product_id=p["id"])
         prices = [h["price"] for h in hist if h["price"]]
         last_checked = max((l["last_checked"] for l in listings if l.get("last_checked")), default=None)
@@ -229,9 +230,11 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None):
             h = db.history(listing_id=l["id"])
             l["analysis"] = analysis.analyze(h)
             l["region_label"] = REGION_LABELS.get(l.get("region"), "")
+            l["country_label"] = country_label(l.get("country"))
         cands = db.list_listings(product_id=pid, status="candidate")
         for l in cands:
             l["region_label"] = REGION_LABELS.get(l.get("region"), "")
+            l["country_label"] = country_label(l.get("country"))
         y = datetime.now().year
         return jsonify({**product_summary(p), "listings": listings, "candidates": cands,
                         "history": db.history(product_id=pid),
@@ -312,14 +315,23 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None):
     # ------------------------------------------------------------ shops
     @app.get("/api/shops")
     def shops():
-        return jsonify([{**s, "region_label": REGION_LABELS.get(s["region"], ""), "used": db.shop_usage(s["id"])}
+        return jsonify([{**s, "region_label": REGION_LABELS.get(s["region"], ""),
+                         "country_label": country_label(s.get("country")), "used": db.shop_usage(s["id"])}
                         for s in db.list_shops()])
+
+    @app.get("/api/countries")
+    def countries():
+        return jsonify([{"code": k, "name": v, "region": region_of_country(k)} for k, v in COUNTRIES.items()])
 
     @app.put("/api/shops/<int:sid>")
     def update_shop(sid):
         b = request.get_json() or {}
         if "search_enabled" in b:
             b["search_enabled"] = 1 if b["search_enabled"] else 0
+        if "country" in b:
+            if b["country"] not in COUNTRIES:
+                return err("Άγνωστη χώρα")
+            b["region"] = region_of_country(b["country"])  # η περιοχή ακολουθεί τη χώρα
         if "region" in b and b["region"] not in REGION_LABELS:
             return err("Άγνωστη περιοχή")
         db.update_shop(sid, **b)
@@ -339,13 +351,18 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None):
             return err("Μη έγκυρη διεύθυνση καταστήματος")
         if db.shop_by_domain(domain):
             return err(f"Υπάρχει ήδη κατάστημα για το {domain}")
-        region = b.get("region") or "GR"
+        country = b.get("country")
+        if country is None:
+            country = guess_country(domain) or ("GR" if not b.get("region") or b.get("region") == "GR" else "")
+        if country not in COUNTRIES:
+            return err("Άγνωστη χώρα")
+        region = region_of_country(country) if country else (b.get("region") or "OTHER")
         if region not in REGION_LABELS:
             return err("Άγνωστη περιοχή")
         url = (b.get("search_url") or "").strip()
         if url and "{q}" not in url:
             return err("Το URL αναζήτησης πρέπει να περιέχει {q} στη θέση του προϊόντος")
-        sid = db.create_shop(name, region, domain, url, 1 if url else 0)
+        sid = db.create_shop(name, region, domain, url, 1 if url else 0, country=country)
         detecting = False
         if not url and hasattr(worker, "detect"):
             worker.detect[sid] = {"state": "queued", "message": "Σε αναμονή…"}
@@ -436,7 +453,7 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None):
             "app": "PriceTracker", "kind": "settings", "version": __version__,
             "exported_at": datetime.now().replace(microsecond=0).isoformat(),
             "settings": {k: s.get(k, v) for k, v in DEFAULT_SETTINGS.items()},
-            "shops": [{"name": x["name"], "domain": x["domain"], "region": x["region"],
+            "shops": [{"name": x["name"], "domain": x["domain"], "region": x["region"], "country": x.get("country") or "",
                        "search_url": x.get("search_url") or "", "search_enabled": bool(x.get("search_enabled"))}
                       for x in db.list_shops()],
         }
@@ -494,16 +511,20 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None):
             domain = host_of("https://" + str(x.get("domain") or "").strip())
             name = str(x.get("name") or "").strip()
             region = x.get("region") if x.get("region") in REGION_LABELS else "OTHER"
+            country = x.get("country") if x.get("country") in COUNTRIES else guess_country(domain)
+            if country:
+                region = region_of_country(country)
             url = str(x.get("search_url") or "").strip()
             if not domain or "." not in domain or not name or (url and "{q}" not in url):
                 continue
             enabled = 1 if (x.get("search_enabled") and url) else 0
             have = db.shop_by_domain(domain)
             if have:
-                db.update_shop(have["id"], name=name, region=region, search_url=url, search_enabled=enabled)
+                db.update_shop(have["id"], name=name, region=region, search_url=url, search_enabled=enabled,
+                               country=country)
                 updated += 1
             else:
-                db.create_shop(name, region, domain, url, enabled)
+                db.create_shop(name, region, domain, url, enabled, country=country)
                 added += 1
         apply_autostart(settings)
         return jsonify({"ok": True, "settings": len(settings), "shops_added": added, "shops_updated": updated})

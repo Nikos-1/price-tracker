@@ -14,7 +14,7 @@ from .browser import Browser
 from .extract import extract
 from .search import (build_query, find_candidates, looks_like_search_results, search_url,
                      search_url_candidates)
-from .shops import REGION_LABELS, host_of
+from .shops import DEFAULT_SHOPS, REGION_LABELS, country_label, host_of
 
 log = logging.getLogger(__name__)
 
@@ -51,6 +51,7 @@ class Worker:
         self._thread.start()
         if check_on_start:
             self.enqueue("check_all")
+            self.detect_new_default_shops()
         self._sched.start()
 
     def stop(self):
@@ -74,6 +75,15 @@ class Worker:
         entry = f"{datetime.now():%H:%M:%S} {msg}"
         self.status["log"] = (self.status["log"] + [entry])[-60:]
 
+    def detect_new_default_shops(self):
+        """Προεπιλεγμένα καταστήματα χωρίς URL αναζήτησης: η εφαρμογή το βρίσκει μόνη της (μία φορά το καθένα)."""
+        tried = set(self.db.get_settings().get("detect_tried") or [])
+        keys = {s["key"] for s in DEFAULT_SHOPS}
+        for sh in self.db.list_shops():
+            if sh["key"] in keys and not sh.get("search_url") and sh["key"] not in tried:
+                self.detect[sh["id"]] = {"state": "queued", "message": "Σε αναμονή…"}
+                self.enqueue("detect_search", shop_id=sh["id"])
+
     # ------------------------------------------------------------ loops
     def _scheduler(self):
         last = time.time()
@@ -86,6 +96,13 @@ class Worker:
                 except Exception:  # noqa: BLE001
                     log.exception("warranty check failed")
             settings = self.db.get_settings()
+            if settings.get("research_daily", True) and not self.status["running"]:
+                last_r = float(settings.get("last_research_ts") or 0)
+                if last_r == 0:  # πρώτη φορά: όχι αμέσως, άσε πρώτα τους ελέγχους τιμών
+                    self.db.set_settings({"last_research_ts": time.time() - 23 * 3600})
+                elif time.time() - last_r > 24 * 3600:
+                    self.db.set_settings({"last_research_ts": time.time()})
+                    self.enqueue("research_all")
             hours = analysis.current_interval_hours(settings)
             base = self.status.get("last_run_ts") or last
             nxt = base + hours * 3600
@@ -119,6 +136,8 @@ class Worker:
                     self.new_product(kw["product_id"], kw.get("search", True))
                 elif kind == "search_product":
                     self.search_product(kw["product_id"])
+                elif kind == "research_all":
+                    self.research_all()
                 elif kind == "detect_search":
                     self.detect_search(kw["shop_id"])
                 self.status["last_error"] = None
@@ -259,7 +278,8 @@ class Worker:
         if prev is None:
             return []
         base = {"product": product["name"], "shop": l.get("shop_name") or "", "region": l.get("region"),
-                "region_label": REGION_LABELS.get(l.get("region"), ""), "price": price, "currency": currency,
+                "region_label": (country_label(l.get("country")) or REGION_LABELS.get(l.get("region"), "")),
+                "price": price, "currency": currency,
                 "url": l["url"], "target": product.get("target_price"),
                 "screenshot": str(self.data_dir / shot) if shot else None}
         out = []
@@ -384,6 +404,10 @@ class Worker:
             st.update(state="notfound", message=f"Δεν βρέθηκε: {e}")
             self._log(f"{shop['name']}: εύρεση αναζήτησης απέτυχε: {e}")
             return
+        sh = self.db.get_shop(shop_id)
+        if sh:
+            tried = set(self.db.get_settings().get("detect_tried") or [])
+            self.db.set_settings({"detect_tried": sorted(tried | {sh["key"]})})
         url = found or guess
         if url and not (self.db.get_shop(shop_id) or {}).get("search_url"):
             self.db.update_shop(shop_id, search_url=url, search_enabled=1)
@@ -395,19 +419,56 @@ class Worker:
             st.update(state="notfound", message="Δεν βρέθηκε. Πρόσθεσέ το με το χέρι.")
         self._log(f"{shop['name']}: URL αναζήτησης: {url or 'δεν βρέθηκε'}")
 
-    def search_product(self, product_id: int):
+    def research_all(self):
+        """Μία φορά τη μέρα: ψάχνει κάθε προϊόν που παρακολουθείς στα καταστήματα που δεν το έχουν ακόμα
+        και ειδοποιεί αν βρεθεί σε νέο κατάστημα (για επιβεβαίωση)."""
+        products = self.db.list_products(purchased=False)
+        news = []
+        for i, p in enumerate(products, 1):
+            if self._stop.is_set():
+                break
+            shops = self.search_product(p["id"], label=f"Ημερήσια αναζήτηση {i}/{len(products)}")
+            if shops:
+                news.append((p, shops))
+        if not news:
+            return
+        settings = self.db.get_settings()
+        if not settings.get("notify_new_shop", True):
+            return
+        lines = [f"• {p['name']}: {', '.join(shops)}" for p, shops in news]
+        subject = (f"[Price Tracker] Βρέθηκε σε νέο κατάστημα: {news[0][0]['name']}" if len(news) == 1
+                   else f"[Price Tracker] {len(news)} προϊόντα βρέθηκαν σε νέα καταστήματα")
+        text = ("Η ημερήσια αναζήτηση βρήκε τα παρακάτω σε καταστήματα που δεν τα είχαν πριν.\n"
+                "Άνοιξε την εφαρμογή και επιβεβαίωσε με ✔ αν είναι το ίδιο προϊόν:\n\n" + "\n".join(lines))
+        if self.notify_callback:
+            try:
+                self.notify_callback(subject.replace("[Price Tracker] ", ""))
+            except Exception:  # noqa: BLE001
+                pass
+        if settings.get("email_enabled"):
+            try:
+                pw = notifier.load_password(self.db, settings.get("smtp_user", ""))
+                notifier.send_email(settings, pw, subject, text)
+            except Exception as e:  # noqa: BLE001
+                self._log(f"Αποτυχία email: {e}")
+        self._log(subject.replace("[Price Tracker] ", ""))
+
+    def search_product(self, product_id: int, label: str | None = None) -> list[str]:
+        """Αναζήτηση στα καταστήματα που δεν έχουν ακόμα το προϊόν. Επιστρέφει τα καταστήματα με νέες προτάσεις."""
         product = self.db.get_product(product_id)
         if not product:
-            return
+            return []
         existing = self.db.list_listings(product_id=product_id, status=None)
         have_shops = {l["shop_id"] for l in existing}
         title = next((l["title"] for l in existing if l.get("title")), product["name"])
         shops = [s for s in self.db.list_shops()
                  if s["search_enabled"] and s.get("search_url") and s["id"] not in have_shops]
         if not shops:
-            return
+            return []
         query = build_query(title, product.get("ean"), product.get("mpn"), product.get("brand"))
-        self.status.update(task=f"Αναζήτηση «{query}»", progress=0, total=len(shops))
+        self.status.update(task=(f"{label}: " if label else "") + f"Αναζήτηση «{query}»", progress=0,
+                           total=len(shops))
+        new_shops: list[str] = []
         self._log(f"Αναζήτηση «{query}» σε {len(shops)} καταστήματα")
         found = 0
         with self._browser() as br:
@@ -428,6 +489,9 @@ class Worker:
                     for c in cands:
                         self.db.add_listing(product_id, c["url"], status="candidate", title=c["title"])
                         found += 1
+                    if cands:
+                        new_shops.append(s["name"])
                 except Exception as e:  # noqa: BLE001
                     self._log(f"Αναζήτηση στο {s['name']} απέτυχε: {str(e).splitlines()[0][:200]}")
         self._log(f"Βρέθηκαν {found} πιθανές αντιστοιχίες – έλεγξέ τις στο προϊόν")
+        return new_shops
