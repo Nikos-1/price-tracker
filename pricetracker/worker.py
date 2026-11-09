@@ -14,7 +14,7 @@ from .browser import Browser
 from .extract import extract
 from .search import (build_query, find_candidates, looks_like_search_results, search_url,
                      search_url_candidates)
-from .shops import DEFAULT_SHOPS, REGION_LABELS, country_label, host_of
+from .shops import DEFAULT_SHOPS, REGION_LABELS, country_label, currency_of_country, host_of
 
 log = logging.getLogger(__name__)
 
@@ -241,6 +241,10 @@ class Worker:
             if info.price is None and info.in_stock is None:
                 raise RuntimeError("Δεν βρέθηκε τιμή ή διαθεσιμότητα στη σελίδα")
             in_stock = info.in_stock if info.in_stock is not None else (info.price is not None)
+            # Νόμισμα: από τη σελίδα, αλλιώς αυτό που όρισε ο χρήστης, αλλιώς από τη χώρα του καταστήματος
+            info.currency = info.currency or l.get("currency_override") or currency_of_country(l.get("country"))
+            if info.price is not None and not info.currency:
+                self._ask_currency(l, product)
             changed = (prev is None or prev["price"] != info.price or bool(prev["in_stock"]) != bool(in_stock))
             shot = None
             if info.price is not None and (changed or settings.get("screenshot_mode") == "always"
@@ -280,6 +284,19 @@ class Worker:
         return self._alerts_for(l, product, prev, prev_ok, info.price, info.currency, in_stock, shot, settings,
                                 price_eur=price_eur)
 
+    def _ask_currency(self, l, product):
+        """Η τιμή βρέθηκε αλλά όχι το νόμισμα: ζητάμε από τον χρήστη να το διαλέξει (μία ειδοποίηση)."""
+        self._log(f"{l.get('shop_name')}: δεν βρέθηκε το νόμισμα της τιμής, διάλεξέ το στο προϊόν")
+        if l.get("currency_asked"):
+            return
+        self.db.mark_currency_asked(l["id"])
+        if self.notify_callback:
+            try:
+                self.notify_callback(f"Σε ποιο νόμισμα είναι η τιμή του «{product['name']}» στο {l.get('shop_name')}; "
+                                     "Άνοιξε το προϊόν και διάλεξέ το.")
+            except Exception:  # noqa: BLE001
+                pass
+
     def _fx(self) -> dict:
         if not getattr(self, "fx", None):
             self.fx = self.db.get_settings().get("fx") or {}
@@ -288,7 +305,7 @@ class Worker:
     def _alerts_for(self, l, product, prev, prev_ok, price, currency, in_stock, shot, settings, price_eur=None):
         if prev is None:
             return []
-        if price_eur is None and (currency or "EUR").upper() == "EUR":
+        if price_eur is None and (currency or "").upper() == "EUR":
             price_eur = price
         base = {"product": product["name"], "shop": l.get("shop_name") or "", "region": l.get("region"),
                 "region_label": (country_label(l.get("country")) or REGION_LABELS.get(l.get("region"), "")),
@@ -300,7 +317,7 @@ class Worker:
             out.append({**base, "kind": "in_stock"})
         tgt = product.get("target_price")
         prev_eur = prev.get("price_eur") if "price_eur" in prev.keys() else None
-        if prev_eur is None and (prev.get("currency") or "EUR").upper() == "EUR":
+        if prev_eur is None and (prev.get("currency") or "").upper() == "EUR":
             prev_eur = prev["price"]
         # Η τιμή-στόχος είναι σε €: συγκρίνεται με την τιμή σε € (μετά τη μετατροπή αν χρειάζεται)
         if settings.get("notify_target_price", True) and tgt and price_eur and in_stock and price_eur <= tgt and \
@@ -470,6 +487,15 @@ class Worker:
                 self._log(f"Αποτυχία email: {e}")
         self._log(subject.replace("[Price Tracker] ", ""))
 
+    def search_shops(self, product_id: int, have_shops=frozenset()) -> list[dict]:
+        """Τα καταστήματα όπου ψάχνεται το προϊόν. Αν έχει γενική κατηγορία (π.χ. Ηλεκτρικές συσκευές), παραλείπονται
+        τα καταστήματα άλλων κατηγοριών (π.χ. Ρούχα). Καταστήματα χωρίς γενική κατηγορία ψάχνονται για όλα."""
+        sector = self.db.product_sector(product_id)
+        shop_secs = self.db.shop_sector_ids()
+        return [s for s in self.db.list_shops()
+                if s["search_enabled"] and s.get("search_url") and s["id"] not in have_shops
+                and (not sector or not shop_secs.get(s["id"]) or sector in shop_secs[s["id"]])]
+
     def search_product(self, product_id: int, label: str | None = None) -> list[str]:
         """Αναζήτηση στα καταστήματα που δεν έχουν ακόμα το προϊόν. Επιστρέφει τα καταστήματα με νέες προτάσεις."""
         product = self.db.get_product(product_id)
@@ -478,8 +504,7 @@ class Worker:
         existing = self.db.list_listings(product_id=product_id, status=None)
         have_shops = {l["shop_id"] for l in existing}
         title = next((l["title"] for l in existing if l.get("title")), product["name"])
-        shops = [s for s in self.db.list_shops()
-                 if s["search_enabled"] and s.get("search_url") and s["id"] not in have_shops]
+        shops = self.search_shops(product_id, have_shops)
         if not shops:
             return []
         query = build_query(title, product.get("ean"), product.get("mpn"), product.get("brand"))

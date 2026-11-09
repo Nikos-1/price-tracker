@@ -221,11 +221,13 @@ def export_settings_xlsx(settings: dict, shops: list[dict], out_path: Path) -> P
     _autowidth(ws, 70)
 
     ws = wb.create_sheet("Καταστήματα")
-    _header(ws, ["Όνομα", "Διεύθυνση", "Χώρα", "Περιοχή", "URL αναζήτησης", "Αναζήτηση", "Προϊόντα"])
+    _header(ws, ["Όνομα", "Διεύθυνση", "Χώρα", "Περιοχή", "URL αναζήτησης", "Αναζήτηση", "Προϊόντα",
+                    "Γενικές κατηγορίες"])
     for s in shops:
         ws.append([s["name"], s["domain"], country_label(s.get("country")), REGION_LABELS.get(s["region"], s["region"]),
                    s.get("search_url") or "",
-                   "Ναι" if s.get("search_enabled") else "Όχι", s.get("used", 0)])
+                   "Ναι" if s.get("search_enabled") else "Όχι", s.get("used", 0),
+                   s.get("sectors") or "Όλες"])
     ws.auto_filter.ref = ws.dimensions
     _autowidth(ws, 80)
     wb.save(out_path)

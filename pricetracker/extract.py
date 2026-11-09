@@ -74,7 +74,12 @@ HOST_CURRENCY = {".co.uk": "GBP", ".uk": "GBP", "amazon.com": "USD", "bhphotovid
                  ".dk": "DKK", ".hu": "HUF", ".ro": "RON", ".bg": "BGN"}
 
 
-def currency_for_host(host: str) -> str:
+EURO_TLDS = {"gr", "de", "it", "fr", "es", "nl", "be", "at", "ie", "fi", "pt", "sk", "si", "ee", "lv", "lt",
+             "lu", "mt", "cy", "hr", "bg", "eu"}
+
+
+def currency_for_host(host: str) -> str | None:
+    """Νόμισμα από τη διεύθυνση, όταν η σελίδα δεν το λέει. None = άγνωστο (π.χ. .com): θα ρωτηθεί ο χρήστης."""
     host = (host or "").lower()
     for suffix, code in HOST_CURRENCY.items():
         if suffix.startswith("."):
@@ -82,7 +87,8 @@ def currency_for_host(host: str) -> str:
                 return code
         elif host == suffix or host.endswith("." + suffix):
             return code
-    return "EUR"
+    tld = host.rsplit(".", 1)[-1] if "." in host else ""
+    return "EUR" if tld in EURO_TLDS else None
 
 
 def detect_currency(text, default=None) -> str | None:
@@ -290,7 +296,7 @@ def from_amazon(soup, html: str) -> ProductInfo:
     )
     if price_txt:
         p.price = parse_price(price_txt)
-        p.currency = detect_currency(price_txt, "EUR")
+        p.currency = detect_currency(price_txt, None)
     avail = _sel_text(soup, "#availability", "#outOfStock", "#availability_feature_div")
     p.in_stock = availability_from_text(avail)
     if p.in_stock is None:
@@ -318,7 +324,7 @@ def from_ebay(soup, html: str) -> ProductInfo:
     price_txt = _sel_text(soup, ".x-price-primary", "#prcIsum", ".x-bin-price__content")
     if price_txt:
         p.price = parse_price(price_txt)
-        p.currency = detect_currency(price_txt, "EUR")
+        p.currency = detect_currency(price_txt, None)
     status = _sel_text(soup, ".d-statusmessage", ".x-quantity__availability", ".ux-message__content")
     p.in_stock = availability_from_text(status)
     if p.in_stock is None and (soup.select_one("#binBtn_btn") or soup.select_one("[data-testid='x-bin-action']")

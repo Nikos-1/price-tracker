@@ -66,9 +66,9 @@ def get_rates(db, max_age_s: int = MAX_AGE_S, fetch=fetch_rates, force: bool = F
 
 
 def to_eur(amount, currency, fx: dict | None) -> float | None:
-    if amount is None:
-        return None
-    cur = (currency or "EUR").upper()
+    if amount is None or not currency:
+        return None  # άγνωστο νόμισμα
+    cur = currency.upper()
     if cur == "EUR":
         return float(amount)
     rate = ((fx or {}).get("rates") or {}).get(cur)
@@ -89,6 +89,8 @@ def fmt_with_eur(amount, currency, amount_eur) -> str:
     """"450,00 $ / ≈401,28 €" για ξένο νόμισμα, αλλιώς σκέτο "401,28 €"."""
     if amount is None:
         return "-"
-    if (currency or "EUR").upper() == "EUR" or amount_eur is None:
+    if not currency:
+        return fmt(amount, "EUR")[:-2] + " (άγνωστο νόμισμα)"
+    if currency.upper() == "EUR" or amount_eur is None:
         return fmt(amount, currency)
     return f"{fmt(amount, currency)} / ≈{fmt(amount_eur)}"

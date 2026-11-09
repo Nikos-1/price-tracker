@@ -115,3 +115,7 @@ html.settings-view .sidebar { display: none; }
 tr.group-row td { background: var(--chip); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .03em; }
 .conv { color: var(--muted); font-weight: 400; white-space: nowrap; }
 .prices.three .val { font-size: 15px; white-space: nowrap; }
+.warn-box { margin-top: 4px; padding: 4px 6px; border-radius: 6px; background: var(--chip); color: var(--warn); font-size: 12px; white-space: normal; }
+.warn-box select { width: auto; margin-top: 4px; padding: 2px 6px; }
+.sec-btn { max-width: 190px; white-space: normal; text-align: left; }
+.sec-list { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 16px; margin: 8px 0; }

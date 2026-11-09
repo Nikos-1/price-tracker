@@ -25,6 +25,21 @@ EU_COUNTRIES = {"CY", "DE", "AT", "IT", "FR", "ES", "PT", "NL", "BE", "LU", "IE"
 TLD_COUNTRY = {"uk": "GB", "co.uk": "GB", "com.be": "BE", "eu": "", "com": "", "net": "", "org": "", "shop": ""}
 
 
+EURO_COUNTRIES = {"GR", "CY", "DE", "AT", "IT", "FR", "ES", "PT", "NL", "BE", "LU", "IE", "FI", "SK", "SI", "HR",
+                  "EE", "LV", "LT", "MT", "BG"}
+COUNTRY_CURRENCY = {"GB": "GBP", "US": "USD", "CH": "CHF", "PL": "PLN", "CZ": "CZK", "SE": "SEK", "DK": "DKK",
+                    "HU": "HUF", "RO": "RON", "NO": "NOK", "CN": "CNY", "JP": "JPY", "CA": "CAD", "TR": "TRY"}
+# Νομίσματα που μπορεί να διαλέξει ο χρήστης όταν η εφαρμογή δεν το βρίσκει μόνη της
+CURRENCY_CHOICES = ["EUR", "USD", "GBP", "CHF", "PLN", "CZK", "SEK", "DKK", "NOK", "HUF", "RON", "CAD", "AUD",
+                    "JPY", "CNY", "TRY"]
+
+
+def currency_of_country(country: str | None) -> str | None:
+    if not country:
+        return None
+    return "EUR" if country in EURO_COUNTRIES else COUNTRY_CURRENCY.get(country)
+
+
 def region_of_country(country: str) -> str:
     if country == "GR":
         return REGION_GR
@@ -51,6 +66,20 @@ def country_label(code: str) -> str:
 # Τα URL αναζήτησης μπορούν να αλλάξουν από τις Ρυθμίσεις αν κάποιο κατάστημα αλλάξει.
 # Προεπιλεγμένα καταστήματα που αφαιρέθηκαν σε νεότερη έκδοση (σβήνονται και από τις υπάρχουσες βάσεις)
 REMOVED_DEFAULT_KEYS = ("mediamarkt_gr", "ebay_de")
+
+# Γενικές κατηγορίες καταστημάτων (ο χρήστης προσθέτει, μετονομάζει και διαγράφει από τις Ρυθμίσεις).
+# Ένα κατάστημα χωρίς γενική κατηγορία θεωρείται ότι πουλάει τα πάντα και ψάχνεται για όλα τα προϊόντα.
+ELEC, APPL = "Ηλεκτρονικά & υπολογιστές", "Ηλεκτρικές συσκευές"
+DEFAULT_SECTORS = [ELEC, APPL, "Ρούχα", "Παπούτσια", "Κοσμήματα & ρολόγια", "Σπίτι & κήπος", "Αθλητικά",
+                   "Παιχνίδια", "Βιβλία", "Ομορφιά & υγεία", "Αυτοκίνητο & μηχανή"]
+DEFAULT_SHOP_SECTORS = {
+    **{k: [ELEC, APPL] for k in ("plaisio", "kotsovolos", "electronet", "you_gr", "msystems", "stelioskanaras",
+                                 "alternate_de", "cyberport", "proshop_de")},
+    **{k: [ELEC] for k in ("germanos", "mindfactory", "caseking", "notebooksbilliger", "computeruniverse",
+                           "pccomponentes", "ldlc", "scan_uk", "overclockers_uk", "newegg", "bhphoto")},
+    # BestPrice, Public, e-shop, Shopflix και Amazon: χωρίς γενική κατηγορία, δηλαδή για όλα
+}
+
 
 def _shop(key, name, country, domain, search_url=""):
     return {"key": key, "name": name, "country": country, "region": region_of_country(country),

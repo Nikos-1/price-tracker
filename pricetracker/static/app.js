@@ -5,6 +5,7 @@ const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "
 const CUR_SYMBOLS = { EUR: "€", USD: "$", GBP: "£", JPY: "¥", CNY: "¥", PLN: "zł", CZK: "Kč", SEK: "kr", DKK: "kr", NOK: "kr", HUF: "Ft", RON: "lei", BGN: "лв", CAD: "C$", AUD: "A$", TRY: "₺" };
 const eur = (v, cur) => (v == null ? "–" : v.toLocaleString("el-GR", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " " + (CUR_SYMBOLS[cur || "EUR"] || cur));
 // Τιμή σε ξένο νόμισμα μαζί με τη μετατροπή σε €: «450,00 $ / ≈401,28 €»
+const CURRENCIES = ["EUR", "USD", "GBP", "CHF", "PLN", "CZK", "SEK", "DKK", "NOK", "HUF", "RON", "CAD", "AUD", "JPY", "CNY", "TRY"];
 const money = (v, cur, v_eur) => (v == null ? "–" : !cur || cur === "EUR" || v_eur == null ? eur(v, cur)
   : `${eur(v, cur)} <span class="conv" title="Με την ισοτιμία της Ευρωπαϊκής Κεντρικής Τράπεζας">/ ≈${eur(v_eur)}</span>`);
 const fmtDate = (s) => (s ? new Date(s.replace(" ", "T")).toLocaleString("el-GR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" }) : "–");
@@ -137,6 +138,40 @@ async function pickedCategory(m, id) {
   return r.id;
 }
 
+// ---------------------------------------------------------------- γενικές κατηγορίες καταστημάτων
+// Π.χ. «Ηλεκτρικές συσκευές», «Ρούχα». Ένα προϊόν με γενική κατηγορία ψάχνεται μόνο σε καταστήματα αυτής της
+// κατηγορίας και σε όσα δεν έχουν δηλωμένη καμία (π.χ. BestPrice, Amazon).
+async function loadSectors() { state.sectors = await api("GET", "/api/sectors"); return state.sectors; }
+function sectorPicker(id, selected) {
+  return `<select id="${id}"><option value="">Όλα τα καταστήματα</option>` +
+    (state.sectors || []).map((x) => `<option value="${x.id}" ${x.id === selected ? "selected" : ""}>${esc(x.name)}</option>`).join("") +
+    `<option value="__new">+ Νέα γενική κατηγορία…</option></select>
+    <input id="${id}-new" placeholder="Όνομα νέας γενικής κατηγορίας" style="display:none;margin-top:6px">`;
+}
+function bindSectorPicker(m, id, catId) {
+  const sel = $("#" + id, m), inp = $("#" + id + "-new", m);
+  sel.onchange = () => { inp.style.display = sel.value === "__new" ? "" : "none"; if (sel.value === "__new") inp.focus(); };
+  // Αλλαγή κατηγορίας: προτείνεται η γενική κατηγορία που έχει ήδη αυτή η κατηγορία
+  const cat = catId && $("#" + catId, m);
+  if (cat) cat.addEventListener("change", () => {
+    const c = state.categories.find((x) => String(x.id) === cat.value);
+    if (c && c.sector_id) { sel.value = c.sector_id; sel.onchange(); }
+  });
+}
+async function pickedSector(m, id) {
+  const sel = $("#" + id, m), inp = $("#" + id + "-new", m);
+  if (sel.value !== "__new") return sel.value;
+  const name = inp.value.trim();
+  if (!name) throw new Error("Γράψε το όνομα της νέας γενικής κατηγορίας");
+  const existing = (state.sectors || []).find((x) => x.name.toLowerCase() === name.toLowerCase());
+  if (existing) return existing.id;
+  const r = await api("POST", "/api/sectors", { name });
+  await loadSectors();
+  return r.id;
+}
+const SECTOR_HINT = `<div class="hint">Η αναζήτηση γίνεται μόνο στα καταστήματα αυτής της γενικής κατηγορίας (και σε όσα πουλάνε απ' όλα). Οι γενικές κατηγορίες των καταστημάτων ορίζονται στις Ρυθμίσεις.</div>`;
+function catSector(catId) { const c = state.categories.find((x) => x.id === +catId); return c ? c.sector_id || null : null; }
+
 // ---------------------------------------------------------------- λίστα προϊόντων
 async function renderList() {
   const q = new URLSearchParams({ category: state.category, purchased: state.purchased });
@@ -163,10 +198,11 @@ function cardHtml(p) {
   else chips.push(`<span class="chip">Αναμονή ελέγχου…</span>`);
   if (p.target_price) chips.push(`<span class="chip">Στόχος ${eur(p.target_price)}</span>`);
   if (p.candidate_count) chips.push(`<span class="chip warn">${p.candidate_count} ${p.candidate_count === 1 ? "πρόταση" : "προτάσεις"} για επιβεβαίωση</span>`);
+  if (p.need_currency) chips.push(`<span class="chip warn">Διάλεξε νόμισμα τιμής</span>`);
   if (p.error_count) chips.push(`<span class="chip bad">${p.error_count} ${p.error_count === 1 ? "σφάλμα" : "σφάλματα"} ελέγχου</span>`);
   return `<div class="card">
     <div class="title" data-open="${p.id}">${p.image_url ? `<img src="${esc(p.image_url)}" alt="" onerror="this.remove()">` : ""}<span>${esc(p.name)}</span></div>
-    <div class="meta">${esc(p.category_name || "Χωρίς κατηγορία")} · ${p.listing_count} καταστήματα · Χαμηλότερη ποτέ: ${eur(p.min_ever)}</div>
+    <div class="meta">${esc(p.category_name || "Χωρίς κατηγορία")}${p.sector_name ? ` · <span title="Η αναζήτηση γίνεται μόνο σε σχετικά καταστήματα">${esc(p.sector_name)}</span>` : ""} · ${p.listing_count} καταστήματα · Χαμηλότερη ποτέ: ${eur(p.min_ever)}</div>
     <div class="prices${p.best.OTHER ? " three" : ""}">${priceBox("Ελλάδα", p.best.GR)}${priceBox("Ε.Ε.", p.best.EU)}${p.best.OTHER ? priceBox("Εκτός Ε.Ε.", p.best.OTHER) : ""}</div>
     <div class="row">${chips.join("")}</div>
     <div class="meta">Τελευταίος έλεγχος: ${fmtDate(p.last_checked)}</div>
@@ -193,20 +229,24 @@ async function productAction(act, id, p) {
     }
   }
 }
-function editProduct(p) {
+async function editProduct(p) {
+  await loadSectors();
   modal(`<h2>Τροποποίηση προϊόντος</h2>
     <label>Όνομα</label><input id="ep-name" value="${esc(p.name)}">
     <div class="two"><div><label>Κατηγορία</label>${categoryPicker("ep-cat", p.category_id)}</div>
     <div><label>Τιμή-στόχος (€)</label><input id="ep-target" value="${p.target_price ?? ""}" placeholder="π.χ. 99,90"></div></div>
+    <label>Γενική κατηγορία (σε ποια καταστήματα να ψάχνεται)</label>${sectorPicker("ep-sec", p.sector_id || catSector(p.category_id))}${SECTOR_HINT}
     <label>Σημειώσεις</label><textarea id="ep-notes" rows="3">${esc(p.notes || "")}</textarea>
     <div class="btns"><button data-close>Άκυρο</button><button class="primary" id="ep-save">Αποθήκευση</button></div>`,
     { onMount: (m, close) => {
         bindCategoryPicker(m, "ep-cat");
+        bindSectorPicker(m, "ep-sec", "ep-cat");
         $("#ep-save", m).onclick = () => run(async () => {
           const category_id = await pickedCategory(m, "ep-cat");
-          await api("PUT", "/api/products/" + p.id, { name: $("#ep-name", m).value, category_id,
+          const sector_id = await pickedSector(m, "ep-sec");
+          await api("PUT", "/api/products/" + p.id, { name: $("#ep-name", m).value, category_id, sector_id,
             target_price: $("#ep-target", m).value, notes: $("#ep-notes", m).value });
-          close(); refresh();
+          close(); await loadCategories(); refresh();
         });
       } });
 }
@@ -387,7 +427,9 @@ function editWarranty(p) {
       } });
 }
 
-function addProduct() {
+async function addProduct() {
+  await loadSectors();
+  const cat0 = typeof state.category === "string" && +state.category > 0 ? +state.category : null;
   modal(`<h2>Προσθήκη προϊόντος</h2>
     <label>Link προϊόντος από κατάστημα</label>
     <input id="ap-url" placeholder="https://www.bestprice.gr/item/... ή https://www.plaisio.gr/...">
@@ -395,14 +437,17 @@ function addProduct() {
     <label>Όνομα (προαιρετικό – συμπληρώνεται αυτόματα)</label><input id="ap-name" placeholder="π.χ. Corsair RM850x">
     <div class="two"><div><label>Κατηγορία</label>${categoryPicker("ap-cat", typeof state.category === "string" && +state.category > 0 ? +state.category : null)}</div>
     <div><label>Τιμή-στόχος (€, προαιρετικό)</label><input id="ap-target" placeholder="π.χ. 99,90"></div></div>
+    <label>Γενική κατηγορία (π.χ. Ηλεκτρικές συσκευές, Ρούχα)</label>${sectorPicker("ap-sec", catSector(cat0))}${SECTOR_HINT}
     <label class="inline"><input type="checkbox" id="ap-search" checked> Αναζήτηση και στα άλλα καταστήματα</label>
     <div class="btns"><button data-close>Άκυρο</button><button class="primary" id="ap-save">Προσθήκη</button></div>`,
     { onMount: (m, close) => {
         bindCategoryPicker(m, "ap-cat");
+        bindSectorPicker(m, "ap-sec", "ap-cat");
         $("#ap-save", m).onclick = () => run(async () => {
           const category_id = await pickedCategory(m, "ap-cat");
+          const sector_id = await pickedSector(m, "ap-sec");
           const r = await api("POST", "/api/products", { url: $("#ap-url", m).value, name: $("#ap-name", m).value,
-            category_id, target_price: $("#ap-target", m).value, search: $("#ap-search", m).checked });
+            category_id, sector_id, target_price: $("#ap-target", m).value, search: $("#ap-search", m).checked });
           close(); toast("Προστέθηκε. Γίνεται ο πρώτος έλεγχος…");
           await loadCategories(); openProduct(r.id);
         });
@@ -422,7 +467,9 @@ async function renderDetail() {
   p.listings.forEach((l) => (groups[l.region] || groups.OTHER).push(l));
   const listingRows = (arr) => arr.map((l) => `<tr>
       <td><a href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.shop_name)}</a>${l.country_label && l.region !== "GR" ? ` <span class="chip">${esc(l.country_label)}</span>` : ""}<div class="hint">${esc((l.title || "").slice(0, 90))}</div></td>
-      <td class="num"><b>${money(l.last_price, l.last_currency, l.last_price_eur)}</b></td>
+      <td class="num">${l.last_price != null && !l.last_currency
+        ? `<b>${eur(l.last_price, "EUR").replace(" €", "")}</b><div class="warn-box">Σε ποιο νόμισμα είναι;<br><select data-cur="${l.id}"><option value="">Διάλεξε…</option>${CURRENCIES.map((c) => `<option value="${c}">${c} ${CUR_SYMBOLS[c] || ""}</option>`).join("")}</select></div>`
+        : `<b>${money(l.last_price, l.last_currency, l.last_price_eur)}</b>`}</td>
       <td>${l.last_in_stock == null ? "–" : l.last_in_stock ? '<span class="chip ok">Ναι</span>' : '<span class="chip bad">Όχι</span>'}
           ${l.last_error ? `<div class="err">${esc(l.last_error)}</div>` : ""}</td>
       <td class="num">${eur(l.analysis.min_30)}<div class="hint">συνήθης ${eur(l.analysis.median_30)}</div></td>
@@ -445,7 +492,7 @@ async function renderDetail() {
   main.innerHTML = `<div class="detail">
     <button class="link" id="back">← Πίσω στη λίστα</button>
     <h2>${esc(p.name)}</h2>
-    <div class="meta">${esc(p.category_name || "Χωρίς κατηγορία")} ${p.ean ? "· EAN " + esc(p.ean) : ""} ${p.mpn ? "· Κωδ. " + esc(p.mpn) : ""}
+    <div class="meta">${esc(p.category_name || "Χωρίς κατηγορία")}${p.sector_name ? ` · <span title="Η αναζήτηση γίνεται μόνο σε σχετικά καταστήματα">${esc(p.sector_name)}</span>` : ""} ${p.ean ? "· EAN " + esc(p.ean) : ""} ${p.mpn ? "· Κωδ. " + esc(p.mpn) : ""}
       ${p.target_price ? "· Στόχος " + eur(p.target_price) : ""} ${p.purchased ? `· <b>Αγοράστηκε ${esc(p.purchased_at || "")} ${p.purchased_price ? eur(p.purchased_price) : ""} ${esc(p.purchased_shop || "")}</b>` : ""}</div>
     ${p.notes ? `<p>${esc(p.notes)}</p>` : ""}
     <div class="row" style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
@@ -480,6 +527,12 @@ async function renderDetail() {
   main.querySelectorAll("[data-act]").forEach((b) => b.onclick = () => productAction(b.dataset.act, p.id, p));
   main.querySelectorAll("[data-acc]").forEach((b) => b.onclick = () => run(async () => { await api("POST", `/api/listings/${b.dataset.acc}/accept`); renderDetail(); }));
   main.querySelectorAll("[data-rej]").forEach((b) => b.onclick = () => run(async () => { await api("POST", `/api/listings/${b.dataset.rej}/reject`); renderDetail(); }));
+  main.querySelectorAll("[data-cur]").forEach((sel) => sel.onchange = () => run(async () => {
+    if (!sel.value) return;
+    await api("PUT", `/api/listings/${sel.dataset.cur}/currency`, { currency: sel.value });
+    toast("Αποθηκεύτηκε. Θα χρησιμοποιείται και στους επόμενους ελέγχους.");
+    renderDetail();
+  }));
   main.querySelectorAll("[data-check-l]").forEach((b) => b.onclick = () => run(async () => { await api("POST", "/api/check", { product_id: p.id }); toast("Ο έλεγχος ξεκίνησε"); }));
   main.querySelectorAll("[data-del-l]").forEach((b) => b.onclick = async () => {
     if (await confirmBox("Αφαίρεση καταστήματος", "Να αφαιρεθεί αυτό το κατάστημα και το ιστορικό του από το προϊόν;", "Αφαίρεση", true)) {
@@ -524,7 +577,7 @@ function drawChart(p) {
   if (chart) chart.destroy();
   const byListing = {};
   // Το γράφημα είναι σε €, ώστε να συγκρίνονται καταστήματα με διαφορετικό νόμισμα
-  p.history.forEach((h) => { const y = h.price_eur ?? (h.currency && h.currency !== "EUR" ? null : h.price); if (y) (byListing[h.listing_id] ||= []).push({ x: new Date(h.checked_at.replace(" ", "T")).getTime(), y, s: h.in_stock }); });
+  p.history.forEach((h) => { const y = h.price_eur ?? (h.currency === "EUR" ? h.price : null); if (y) (byListing[h.listing_id] ||= []).push({ x: new Date(h.checked_at.replace(" ", "T")).getTime(), y, s: h.in_stock }); });
   const datasets = p.listings.filter((l) => byListing[l.id]).map((l, i) => ({
     label: `${l.shop_name} (${l.region_label})`, data: byListing[l.id], borderColor: COLORS[i % COLORS.length],
     backgroundColor: COLORS[i % COLORS.length], stepped: true, pointRadius: 2, borderWidth: 2,
@@ -563,6 +616,12 @@ async function renderSettings() {
   const s = await api("GET", "/api/settings");
   const shops = await api("GET", "/api/shops");
   const countries = await api("GET", "/api/countries");
+  await loadSectors();
+  const secLabel = (ids) => { const n = (state.sectors || []).filter((x) => ids.includes(x.id)).map((x) => x.name); return n.length ? n.join(", ") : "Όλες"; };
+  const secCell = (ids) => `<button class="small sec-btn" data-secs title="Σε ποιες γενικές κατηγορίες ψάχνεται αυτό το κατάστημα">${esc(secLabel(ids))}</button>`;
+  const sectorRow = (x) => `<tr data-sector="${x.id}"><td><input data-sn value="${esc(x.name)}"></td>
+    <td class="hint">${x.shop_count || 0} ${x.shop_count === 1 ? "κατάστημα" : "καταστήματα"}</td>
+    <td><button class="small danger" data-del-sector title="Διαγραφή">🗑</button></td></tr>`;
   const countrySel = (c, attr = 'data-f="country"', auto = false) => {
     const grp = (region, label) => `<optgroup label="${label}">` + countries.filter((x) => x.region === region && x.code)
       .sort((a, b) => a.name.localeCompare(b.name, "el")).map((x) => `<option value="${x.code}" ${x.code === c ? "selected" : ""}>${esc(x.name)}</option>`).join("") + "</optgroup>";
@@ -571,18 +630,19 @@ async function renderSettings() {
       `<option value="" ${!auto && !c ? "selected" : ""}>Άγνωστη</option></select>`;
   };
   const REGION_TITLES = { GR: "Ελλάδα", EU: "Ευρωπαϊκή Ένωση", OTHER: "Εκτός Ε.Ε. (πιθανοί δασμοί και ΦΠΑ στο τελωνείο)" };
-  const shopRow = (sh) => `<tr data-shop="${sh.id}" data-used="${sh.used || 0}">
+  const shopRow = (sh) => `<tr data-shop="${sh.id}" data-used="${sh.used || 0}" data-sectors="${esc(JSON.stringify(sh.sector_ids || []))}">
     <td style="text-align:center"><input type="checkbox" data-sel title="Επιλογή για διαγραφή"></td>
     <td><input data-f="name" value="${esc(sh.name)}"></td>
     <td class="hint">${esc(sh.domain)}${sh.used ? `<div>${sh.used} ${sh.used === 1 ? "προϊόν" : "προϊόντα"}</div>` : ""}</td>
     <td>${countrySel(sh.country || "")}</td>
     <td><input data-f="search_url" value="${esc(sh.search_url || "")}" placeholder="https://.../search?q={q}">
       <div class="hint" data-detect-msg></div>${sh.search_url ? "" : `<button class="link" data-detect="${sh.id}">🔍 Αυτόματη εύρεση</button>`}</td>
+    <td>${secCell(sh.sector_ids || [])}</td>
     <td style="text-align:center"><input type="checkbox" data-f="search_enabled" ${sh.search_enabled ? "checked" : ""}></td>
     <td><button class="small danger" data-del-shop="${sh.id}" title="Διαγραφή καταστήματος">🗑</button></td></tr>`;
   let lastRegion = null;
   const shopRows = shops.map((sh) => {
-    const head = sh.region !== lastRegion ? `<tr class="group-row"><td colspan="7">${esc(REGION_TITLES[sh.region] || sh.region)}</td></tr>` : "";
+    const head = sh.region !== lastRegion ? `<tr class="group-row"><td colspan="8">${esc(REGION_TITLES[sh.region] || sh.region)}</td></tr>` : "";
     lastRegion = sh.region;
     return head + shopRow(sh);
   }).join("");
@@ -629,15 +689,21 @@ async function renderSettings() {
     <div class="section"><h3>Καταστήματα</h3>
       <p class="hint">Η «Αναζήτηση» χρησιμοποιεί το URL αναζήτησης κάθε καταστήματος ({q} = το προϊόν). Καταστήματα από links που προσθέτεις μπαίνουν εδώ αυτόματα.</p>
       <div class="row-btns" style="margin-bottom:8px"><button class="danger" id="s-del-sel" disabled>🗑 Διαγραφή επιλεγμένων</button></div>
-      <table id="s-shops"><tr><th style="text-align:center;width:36px"><input type="checkbox" id="s-sel-all" title="Επιλογή όλων"></th><th>Όνομα</th><th>Διεύθυνση</th><th>Χώρα</th><th>URL αναζήτησης</th><th>Αναζήτηση</th><th></th></tr>${shopRows}</table>
+      <table id="s-shops"><tr><th style="text-align:center;width:36px"><input type="checkbox" id="s-sel-all" title="Επιλογή όλων"></th><th>Όνομα</th><th>Διεύθυνση</th><th>Χώρα</th><th>URL αναζήτησης</th><th>Γενικές κατηγορίες</th><th>Αναζήτηση</th><th></th></tr>${shopRows}</table>
       <h3 style="margin-top:16px">Προσθήκη καταστήματος</h3>
       <div class="two"><div><label>Όνομα</label><input id="ns-name" placeholder="π.χ. Germanos"></div>
         <div><label>Διεύθυνση (site)</label><input id="ns-domain" placeholder="π.χ. www.germanos.gr"></div></div>
       <div class="two"><div><label>Χώρα</label>${countrySel("", 'id="ns-country"', true)}</div>
         <div><label>URL αναζήτησης (προαιρετικό: αν το αφήσεις κενό, το ψάχνω μόνος μου)</label><input id="ns-url" placeholder="https://www.germanos.gr/search?q={q}"></div></div>
+      <div class="two"><div><label>Γενικές κατηγορίες</label><div id="ns-secs" data-sectors="[]">${secCell([])}</div></div><div></div></div>
       <p class="hint">Για το URL αναζήτησης: κάνε μια αναζήτηση στο site, αντίγραψε τη διεύθυνση και βάλε {q} στη θέση της λέξης που έψαξες.</p>
       <button id="ns-add">+ Προσθήκη καταστήματος</button>
       <button id="s-shops-xlsx" style="margin-left:8px">⬇ Λίστα καταστημάτων σε Excel</button>
+    </div>
+    <div class="section"><h3>Γενικές κατηγορίες καταστημάτων</h3>
+      <p class="hint">Δήλωσε σε κάθε κατάστημα τι πουλάει (στήλη «Γενικές κατηγορίες» πιο πάνω). Όταν ένα προϊόν έχει γενική κατηγορία, π.χ. μια κουζίνα στις «Ηλεκτρικές συσκευές», η αναζήτηση γίνεται μόνο στα καταστήματα αυτής της κατηγορίας και σε όσα δεν έχουν δηλωμένη καμία («Όλες», π.χ. BestPrice, Amazon). Οι αλλαγές εδώ αποθηκεύονται αμέσως.</p>
+      <table id="s-sectors" style="max-width:640px"><tr><th>Όνομα</th><th>Καταστήματα</th><th></th></tr>${(state.sectors || []).map(sectorRow).join("")}</table>
+      <div class="row-btns" style="margin-top:8px"><input id="nsec-name" placeholder="Νέα γενική κατηγορία, π.χ. Είδη κατοικιδίων" style="max-width:340px"><button id="nsec-add">+ Προσθήκη</button></div>
     </div>
     <div class="section"><h3>Εξαγωγή και εισαγωγή ρυθμίσεων</h3>
       <p class="hint">Το αρχείο ρυθμίσεων περιέχει όλες τις ρυθμίσεις σου και τη λίστα καταστημάτων. Χρησιμεύει ως αντίγραφο ασφαλείας ή για μεταφορά σε άλλον υπολογιστή, με την «Εισαγωγή». Ο κωδικός email δεν αποθηκεύεται στο αρχείο. Τα αρχεία μπαίνουν στον φάκελο Έγγραφα\\PriceTracker\\exports.</p>
@@ -676,6 +742,55 @@ async function renderSettings() {
           toast("Το κατάστημα διαγράφηκε");
         }));
         bindDel(m);
+        // Γενικές κατηγορίες ανά κατάστημα: επιλογή με κουτάκια, αποθηκεύεται με την «Αποθήκευση»
+        const refreshSecLabels = () => m.querySelectorAll("[data-sectors]").forEach((el) => {
+          const ids = JSON.parse(el.dataset.sectors || "[]").filter((i) => (state.sectors || []).some((x) => x.id === i));
+          el.dataset.sectors = JSON.stringify(ids);
+          const b = $("[data-secs]", el); if (b) b.textContent = secLabel(ids);
+        });
+        m.addEventListener("click", (e) => {
+          const b = e.target.closest("[data-secs]");
+          if (!b) return;
+          const holder = b.closest("[data-sectors]");
+          const cur = JSON.parse(holder.dataset.sectors || "[]");
+          const name = holder.matches("tr") ? $("[data-f=name]", holder).value : ($("#ns-name", m).value || "νέο κατάστημα");
+          modal(`<h2>Γενικές κατηγορίες: ${esc(name)}</h2>
+            <p class="hint">Τι πουλάει αυτό το κατάστημα; Αν δεν επιλέξεις καμία, θα ψάχνεται για όλα τα προϊόντα.</p>
+            <div class="sec-list">${(state.sectors || []).map((x) => `<label class="inline"><input type="checkbox" value="${x.id}" ${cur.includes(x.id) ? "checked" : ""}> ${esc(x.name)}</label>`).join("")}</div>
+            <div class="btns"><button data-close>Άκυρο</button><button class="primary" id="sec-ok">OK</button></div>`,
+            { onMount: (mm, closeM) => {
+                $("#sec-ok", mm).onclick = () => {
+                  holder.dataset.sectors = JSON.stringify([...mm.querySelectorAll("input:checked")].map((c) => +c.value));
+                  refreshSecLabels(); closeM();
+                };
+              } });
+        });
+        const bindSectorRow = (tr) => {
+          const id = +tr.dataset.sector, inp = $("[data-sn]", tr);
+          inp.onchange = () => run(async () => {
+            try { await api("PUT", `/api/sectors/${id}`, { name: inp.value }); }
+            catch (e) { inp.value = state.sectors.find((x) => x.id === id).name; throw e; }
+            await loadSectors(); refreshSecLabels(); toast("Η γενική κατηγορία μετονομάστηκε");
+          });
+          $("[data-del-sector]", tr).onclick = () => run(async () => {
+            const x = state.sectors.find((y) => y.id === id);
+            if (!(await confirmBox("Διαγραφή γενικής κατηγορίας", `Να διαγραφεί η γενική κατηγορία «${esc(x.name)}»; Τα καταστήματα και τα προϊόντα δεν διαγράφονται· απλώς δεν θα έχουν πια αυτή τη γενική κατηγορία.`, "Διαγραφή", true))) return;
+            await api("DELETE", `/api/sectors/${id}`);
+            tr.remove(); await loadSectors(); refreshSecLabels(); toast("Η γενική κατηγορία διαγράφηκε");
+          });
+        };
+        m.querySelectorAll("tr[data-sector]").forEach(bindSectorRow);
+        $("#nsec-add", m).onclick = () => run(async () => {
+          const name = $("#nsec-name", m).value.trim();
+          if (!name) throw new Error("Γράψε ένα όνομα");
+          await api("POST", "/api/sectors", { name });
+          await loadSectors();
+          const x = state.sectors.find((y) => y.name.toLowerCase() === name.toLowerCase());
+          const tmp = document.createElement("tbody"); tmp.innerHTML = sectorRow(x);
+          const tr = tmp.firstElementChild; $("#s-sectors", m).appendChild(tr); bindSectorRow(tr);
+          $("#nsec-name", m).value = ""; toast(`Προστέθηκε η «${x.name}»`);
+        });
+        $("#nsec-name", m).onkeydown = (e) => { if (e.key === "Enter") $("#nsec-add", m).click(); };
         // Αυτόματη εύρεση URL αναζήτησης: γίνεται στο παρασκήνιο, εδώ απλώς παρακολουθούμε το αποτέλεσμα
         const watchDetect = (id) => {
           const tr = m.querySelector(`tr[data-shop="${id}"]`);
@@ -727,7 +842,8 @@ async function renderSettings() {
           toast(rows.length === 1 ? "Το κατάστημα διαγράφηκε" : `Διαγράφηκαν ${rows.length} καταστήματα`);
         });
         $("#ns-add", m).onclick = () => run(async () => {
-          const body = { name: $("#ns-name", m).value, domain: $("#ns-domain", m).value, search_url: $("#ns-url", m).value };
+          const body = { name: $("#ns-name", m).value, domain: $("#ns-domain", m).value, search_url: $("#ns-url", m).value,
+            sector_ids: JSON.parse($("#ns-secs", m).dataset.sectors || "[]") };
           if ($("#ns-country", m).value !== "auto") body.country = $("#ns-country", m).value;
           const r = await api("POST", "/api/shops", body);
           const sh = (await api("GET", "/api/shops")).find((x) => x.id === r.id);
@@ -738,6 +854,7 @@ async function renderSettings() {
           bindDel(tr);
           bindDetect(tr);
           ["#ns-name", "#ns-domain", "#ns-url"].forEach((x) => ($(x, m).value = ""));
+          $("#ns-secs", m).dataset.sectors = "[]"; refreshSecLabels();
           toast(`Προστέθηκε το ${sh.name}` + (r.detecting ? ". Ψάχνω μόνος μου το URL αναζήτησης." : ""));
           if (r.detecting) watchDetect(r.id);
         });
@@ -775,7 +892,8 @@ async function renderSettings() {
           await api("PUT", "/api/settings", collect());
           for (const tr of m.querySelectorAll("tr[data-shop]")) {
             await api("PUT", "/api/shops/" + tr.dataset.shop, { name: $("[data-f=name]", tr).value, country: $("[data-f=country]", tr).value,
-              search_url: $("[data-f=search_url]", tr).value, search_enabled: $("[data-f=search_enabled]", tr).checked });
+              search_url: $("[data-f=search_url]", tr).value, search_enabled: $("[data-f=search_enabled]", tr).checked,
+              sector_ids: JSON.parse(tr.dataset.sectors || "[]") });
           }
         };
         $("#s-test", m).onclick = () => run(async () => { await saveAll(); await api("POST", "/api/settings/test-email"); toast("Στάλθηκε! Έλεγξε τα εισερχόμενα."); });
