@@ -116,3 +116,34 @@ def test_alerts_back_in_stock(tmp_path, shop):
     db.record_check(lid, 160.0, "EUR", False)  # πριν: μη διαθέσιμο, ακριβό
     worker.check_listings(db.list_listings(pid), "test")
     assert sent and ("Διαθέσιμο" in sent[0] or "ειδοποιήσεις" in sent[0])
+
+
+def test_detect_search_url(tmp_path):
+    """Το κατάστημα δεν δηλώνει URL αναζήτησης: βρίσκεται από τη φόρμα της αρχικής σελίδας."""
+    os.environ.setdefault("PRICETRACKER_BROWSER", CHROME)
+    app = Flask("shop2")
+
+    @app.get("/")
+    def home():
+        return ('<html><body><form id="nav-search" action="/anazitisi"><input type="search" name="kw">'
+                '</form></body></html>')
+
+    @app.get("/anazitisi")
+    def results():
+        from flask import request
+
+        q = request.args.get("kw", "")
+        return f"<html><title>Αναζήτηση: {q}</title><body><h1>Αποτελέσματα για {q}</h1>{'.' * 800}</body></html>"
+
+    srv = make_server("127.0.0.1", 0, app, threaded=True)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        db = Database(tmp_path / "db.sqlite")
+        sid = db.create_shop("Local", "GR", f"127.0.0.1:{srv.server_port}", "", 0)
+        w = Worker(db, tmp_path)
+        w.detect_search(sid)
+        assert w.detect[sid]["state"] == "found", w.detect[sid]
+        sh = db.get_shop(sid)
+        assert sh["search_url"] == f"http://127.0.0.1:{srv.server_port}/anazitisi?kw={{q}}" and sh["search_enabled"] == 1
+    finally:
+        srv.shutdown()

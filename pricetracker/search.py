@@ -129,3 +129,108 @@ def find_candidates(html: str, page_url: str, title: str, ean=None, mpn=None, br
         if url not in seen or seen[url]["score"] < sc:
             seen[url] = {"url": url, "title": text[:250], "score": sc}
     return sorted(seen.values(), key=lambda d: -d["score"])[:limit]
+
+
+# ---------------------------------------------------------------- αυτόματη εύρεση URL αναζήτησης
+SEARCH_PARAM_NAMES = ("q", "query", "search", "s", "text", "k", "keyword", "keywords", "search_query",
+                      "searchterm", "term", "w", "kw", "sSearch", "search_text", "searchQuery", "_nkw", "qs")
+# Συνηθισμένα μοτίβα (WooCommerce, Magento, Shopify, PrestaShop, OpenCart κ.ά.), δοκιμάζονται με τη σειρά
+COMMON_SEARCH_PATHS = ("/search?q={q}", "/search?query={q}", "/search?text={q}", "/?s={q}&post_type=product",
+                       "/catalogsearch/result/?q={q}", "/search?search={q}", "/index.php?route=product/search&search={q}",
+                       "/search?controller=search&s={q}", "/?s={q}", "/el/search?q={q}", "/search/?q={q}")
+
+
+def _template_from_target(target: str, page_url: str) -> str | None:
+    if not target:
+        return None
+    for ph in ("{search_term_string}", "{search_term}", "{query}", "{searchTerms}", "{q}"):
+        if ph in target:
+            t = urljoin(page_url, target.replace(ph, "{q}"))
+            return t if t.startswith("http") else None
+    return None
+
+
+def search_url_candidates(html: str, page_url: str) -> list[str]:
+    """Πιθανά URL αναζήτησης ({q} = το κείμενο) από την αρχική σελίδα ενός καταστήματος, από το πιο αξιόπιστο."""
+    import json
+
+    soup = BeautifulSoup(html or "", "html.parser")
+    out: list[str] = []
+
+    def add(t):
+        if t and t not in out and domain_matches(host_of(t), host_of(page_url)):
+            out.append(t)
+
+    # 1. JSON-LD WebSite → SearchAction (το ίδιο που διαβάζει η Google)
+    for tag in soup.find_all("script", type="application/ld+json"):
+        try:
+            data = json.loads(tag.string or tag.get_text() or "")
+        except ValueError:
+            continue
+        stack = [data]
+        while stack:
+            d = stack.pop()
+            if isinstance(d, list):
+                stack.extend(d)
+            elif isinstance(d, dict):
+                pa = d.get("potentialAction")
+                for a in (pa if isinstance(pa, list) else [pa]):
+                    if isinstance(a, dict) and "Search" in str(a.get("@type", "")):
+                        tgt = a.get("target")
+                        if isinstance(tgt, dict):
+                            tgt = tgt.get("urlTemplate")
+                        elif isinstance(tgt, list):
+                            tgt = next((x if isinstance(x, str) else (x or {}).get("urlTemplate")
+                                        for x in tgt), None)
+                        add(_template_from_target(tgt if isinstance(tgt, str) else "", page_url))
+                stack.extend(v for k, v in d.items() if k in ("@graph", "mainEntity"))
+    # 2. Φόρμα αναζήτησης (GET) με πεδίο κειμένου
+    forms = []
+    for form in soup.find_all("form"):
+        if (form.get("method") or "get").lower() != "get":
+            continue
+        inputs = form.find_all("input")
+        field = None
+        for inp in inputs:
+            typ = (inp.get("type") or "text").lower()
+            name = inp.get("name") or ""
+            if typ in ("search", "text") and name and (typ == "search" or name in SEARCH_PARAM_NAMES
+                                                        or "search" in name.lower() or "query" in name.lower()):
+                field = name
+                break
+        if not field:
+            continue
+        action = urljoin(page_url, form.get("action") or page_url)
+        extra = [(i.get("name"), i.get("value") or "") for i in inputs
+                 if (i.get("type") or "").lower() == "hidden" and i.get("name")]
+        from urllib.parse import urlencode
+
+        qs = urlencode(extra)
+        sep = "&" if "?" in action else "?"
+        tmpl = action.split("#")[0] + sep + (qs + "&" if qs else "") + f"{field}={{q}}"
+        role = " ".join([str(form.get("role") or ""), " ".join(form.get("class") or []), form.get("id") or "",
+                         str(form.get("action") or "")]).lower()
+        forms.append((0 if "search" in role else 1, tmpl))
+    for _, t in sorted(forms, key=lambda x: x[0]):
+        add(t)
+    # 3. Συνηθισμένα μοτίβα
+    parts = urlparse(page_url)
+    base = f"{parts.scheme}://{parts.netloc}"
+    for p in COMMON_SEARCH_PATHS:
+        add(base + p)
+    return out
+
+
+def looks_like_search_results(html: str, final_url: str, word: str, home_url: str) -> bool:
+    """Ελέγχει ότι η σελίδα είναι πράγματι αποτελέσματα αναζήτησης για τη λέξη."""
+    if not html or len(html) < 500:
+        return False
+    if final_url.rstrip("/") == home_url.rstrip("/"):
+        return False
+    low = html.lower()
+    if low.count(word.lower()) < 2:
+        return False
+    nf = ("404", "page not found", "δεν βρέθηκε η σελίδα", "seite nicht gefunden")
+    title = (BeautifulSoup(html, "html.parser").title or "")
+    title = title.get_text().lower() if title else ""
+    return not any(x in title for x in nf)

@@ -148,3 +148,67 @@ def _product_sheet(wb, db, product, listings, used):
     ch.add_data(data, titles_from_data=True)
     ch.set_categories(Reference(ws, min_col=1, min_row=2, max_row=ws.max_row))
     ws.add_chart(ch, f"{get_column_letter(len(listings) + 3)}2")
+
+
+# ---------------------------------------------------------------- ρυθμίσεις και καταστήματα
+SETTING_LABELS = {
+    "check_interval_hours": "Έλεγχος κάθε (ώρες)",
+    "bf_interval_hours": "Έλεγχος κάθε (ώρες) στην περίοδο Black Friday",
+    "bf_window_auto": "Περίοδος Black Friday αυτόματα (20/11 έως 2/12)",
+    "bf_start": "Αρχή περιόδου Black Friday (ΜΜ-ΗΗ)",
+    "bf_end": "Τέλος περιόδου Black Friday (ΜΜ-ΗΗ)",
+    "screenshot_mode": "Screenshots",
+    "browser_mode": "Παράθυρο browser κατά τους ελέγχους",
+    "email_enabled": "Αποστολή email",
+    "smtp_provider": "Πάροχος email",
+    "smtp_host": "SMTP server",
+    "smtp_port": "Θύρα SMTP",
+    "smtp_user": "Λογαριασμός αποστολής",
+    "email_to": "Αποστολή ειδοποιήσεων σε",
+    "notify_back_in_stock": "Ειδοποίηση όταν γίνει διαθέσιμο",
+    "notify_target_price": "Ειδοποίηση όταν φτάσει την τιμή-στόχο",
+    "notify_new_low": "Ειδοποίηση για νέα χαμηλότερη τιμή",
+    "close_action": "Όταν πατάω το Χ",
+    "start_with_windows": "Εκκίνηση μαζί με τα Windows",
+    "auto_update": "Αυτόματη ενημέρωση",
+    "warranty_reminder_days": "Υπενθύμιση πριν λήξει η εγγύηση (μέρες)",
+}
+VALUE_LABELS = {
+    "screenshot_mode": {"changes": "Όταν αλλάζει τιμή ή διαθεσιμότητα", "always": "Σε κάθε έλεγχο"},
+    "browser_mode": {"auto": "Κρυφό, ανοίγει μόνο όταν χρειάζεται ενέργεια", "hidden": "Πάντα κρυφό",
+                     "visible": "Πάντα ορατό"},
+    "close_action": {"ask": "Να ρωτάει", "tray": "Να μένει στο system tray", "exit": "Να κλείνει"},
+    "smtp_provider": {"gmail": "Gmail", "outlook": "Outlook / Hotmail", "custom": "Άλλο (SMTP)"},
+}
+
+
+def _setting_value(key, value):
+    if isinstance(value, bool):
+        return "Ναι" if value else "Όχι"
+    return VALUE_LABELS.get(key, {}).get(value, value)
+
+
+def export_settings_xlsx(settings: dict, shops: list[dict], out_path: Path) -> Path:
+    """Φύλλα «Ρυθμίσεις» και «Καταστήματα». Ο κωδικός email δεν γράφεται ποτέ."""
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Ρυθμίσεις"
+    _header(ws, ["Ρύθμιση", "Τιμή"])
+    for key, label in SETTING_LABELS.items():
+        if key in settings:
+            ws.append([label, _setting_value(key, settings[key])])
+    ws.append([])
+    ws.append([f"Εξαγωγή: {datetime.now():%d/%m/%Y %H:%M}. Ο κωδικός email δεν περιλαμβάνεται."])
+    _autowidth(ws, 70)
+
+    ws = wb.create_sheet("Καταστήματα")
+    _header(ws, ["Όνομα", "Διεύθυνση", "Περιοχή", "URL αναζήτησης", "Αναζήτηση", "Προϊόντα"])
+    for s in shops:
+        ws.append([s["name"], s["domain"], REGION_LABELS.get(s["region"], s["region"]), s.get("search_url") or "",
+                   "Ναι" if s.get("search_enabled") else "Όχι", s.get("used", 0)])
+    ws.auto_filter.ref = ws.dimensions
+    _autowidth(ws, 80)
+    wb.save(out_path)
+    return out_path
