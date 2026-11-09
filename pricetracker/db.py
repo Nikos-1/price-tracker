@@ -86,6 +86,7 @@ CREATE TABLE IF NOT EXISTS receipts (
 MIGRATIONS = {
     "products": [("receipt_id", "INTEGER REFERENCES receipts(id) ON DELETE SET NULL"),
                  ("warranty_months", "INTEGER")],
+    "shops": [("country", "TEXT")],
 }
 
 DEFAULT_SETTINGS = {
@@ -109,6 +110,8 @@ DEFAULT_SETTINGS = {
     "smtp_user": "",
     "email_to": "",
     "screenshot_mode": "changes",    # changes | always
+    "research_daily": True,          # μία φορά τη μέρα αναζήτηση στα καταστήματα που δεν έχουν το προϊόν
+    "notify_new_shop": True,
 }
 
 
@@ -164,13 +167,22 @@ class Database:
                 else:
                     c.execute("DELETE FROM shops WHERE id=?", (r["id"],))
             c.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('removed_defaults_v04','true')")
+        have_domains = {r["domain"] for r in c.execute("SELECT domain FROM shops")}
         for s in shops_mod.DEFAULT_SHOPS:
-            if s["key"] in deleted:
+            if s["key"] in deleted or s["key"] in shops_mod.REMOVED_DEFAULT_KEYS:
                 continue
+            exists = c.execute("SELECT 1 FROM shops WHERE key=?", (s["key"],)).fetchone()
+            if not exists and s["domain"] in have_domains:
+                continue  # ο χρήστης το έχει ήδη προσθέσει μόνος του
             c.execute(
-                "INSERT OR IGNORE INTO shops(key,name,region,domain,search_url) VALUES(?,?,?,?,?)",
-                (s["key"], s["name"], s["region"], s["domain"], s["search_url"]),
+                "INSERT OR IGNORE INTO shops(key,name,region,domain,search_url,country) VALUES(?,?,?,?,?,?)",
+                (s["key"], s["name"], s["region"], s["domain"], s["search_url"], s["country"]),
             )
+        # Χώρα για καταστήματα παλιότερων εκδόσεων (μόνο όπου λείπει, τίποτα άλλο δεν αλλάζει)
+        defaults = {s["key"]: s["country"] for s in shops_mod.DEFAULT_SHOPS}
+        for r in c.execute("SELECT id, key, domain FROM shops WHERE country IS NULL").fetchall():
+            country = defaults.get(r["key"]) or shops_mod.guess_country(r["domain"])
+            c.execute("UPDATE shops SET country=? WHERE id=?", (country, r["id"]))
 
     # ---------- settings ----------
     def get_settings(self) -> dict:
@@ -262,7 +274,7 @@ class Database:
     # ---------- shops ----------
     def list_shops(self):
         with self.conn() as c:
-            return [dict(r) for r in c.execute("SELECT * FROM shops ORDER BY region, name COLLATE NOCASE")]
+            return [dict(r) for r in c.execute("SELECT * FROM shops ORDER BY CASE region WHEN 'GR' THEN 0 WHEN 'EU' THEN 1 ELSE 2 END, country, name COLLATE NOCASE")]
 
     def get_shop(self, shop_id):
         with self.conn() as c:
@@ -270,7 +282,7 @@ class Database:
         return dict(r) if r else None
 
     def update_shop(self, shop_id: int, **fields):
-        allowed = {"name", "region", "search_url", "search_enabled"}
+        allowed = {"name", "region", "search_url", "search_enabled", "country"}
         fields = {k: v for k, v in fields.items() if k in allowed}
         if not fields:
             return
@@ -278,13 +290,16 @@ class Database:
         with self.conn() as c:
             c.execute(f"UPDATE shops SET {sets} WHERE id=?", (*fields.values(), shop_id))
 
-    def create_shop(self, name, region, domain, search_url="", search_enabled=1) -> int:
+    def create_shop(self, name, region, domain, search_url="", search_enabled=1, country=None) -> int:
         domain = domain.lower().removeprefix("www.")
         key = "custom_" + domain.replace(".", "_")
+        if country is None:
+            country = shops_mod.guess_country(domain)
         with self.conn() as c:
             cur = c.execute(
-                "INSERT OR IGNORE INTO shops(key,name,region,domain,search_url,search_enabled) VALUES(?,?,?,?,?,?)",
-                (key, name, region, domain, search_url, search_enabled),
+                "INSERT OR IGNORE INTO shops(key,name,region,domain,search_url,search_enabled,country)"
+                " VALUES(?,?,?,?,?,?,?)",
+                (key, name, region, domain, search_url, search_enabled, country),
             )
             if cur.lastrowid and cur.rowcount:
                 return cur.lastrowid
@@ -401,14 +416,14 @@ class Database:
     def get_listing(self, listing_id: int):
         with self.conn() as c:
             r = c.execute(
-                """SELECT l.*, s.name AS shop_name, s.region AS region, s.key AS shop_key
+                """SELECT l.*, s.name AS shop_name, s.region AS region, s.key AS shop_key, s.country AS country
                    FROM listings l LEFT JOIN shops s ON s.id = l.shop_id WHERE l.id=?""",
                 (listing_id,),
             ).fetchone()
         return dict(r) if r else None
 
     def list_listings(self, product_id=None, status="active"):
-        q = """SELECT l.*, s.name AS shop_name, s.region AS region, s.key AS shop_key
+        q = """SELECT l.*, s.name AS shop_name, s.region AS region, s.key AS shop_key, s.country AS country
                FROM listings l LEFT JOIN shops s ON s.id = l.shop_id WHERE 1=1"""
         args = []
         if product_id is not None:

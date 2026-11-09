@@ -11,7 +11,13 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 from . import analysis, warranty
-from .shops import REGION_LABELS
+from .shops import REGION_LABELS, country_label
+
+
+def _where(l):
+    c = country_label(l.get("country"))
+    r = REGION_LABELS.get(l.get("region"), "")
+    return f"{c} ({r})" if c and c != r else r
 
 HEADER_FILL = PatternFill("solid", fgColor="1F2937")
 HEADER_FONT = Font(color="FFFFFF", bold=True)
@@ -64,14 +70,14 @@ def export_xlsx(db, data_dir: Path, out_path: Path, product_ids: list[int] | Non
             h = db.history(listing_id=l["id"])
             a = analysis.analyze(h)
             ws.append([p["name"], p.get("category_name") or "", status, l.get("shop_name"),
-                       REGION_LABELS.get(l.get("region"), ""), l.get("last_price"),
+                       _where(l), l.get("last_price"),
                        "Ναι" if l.get("last_in_stock") else "Όχι", a.get("min_30"), a.get("median_30"),
                        a.get("min_all"), p.get("target_price"), a.get("label", ""), l.get("last_checked"),
                        l["url"]])
             ws.cell(ws.max_row, 14).hyperlink = l["url"]
             for r in h:
                 hist_ws.append([datetime.fromisoformat(r["checked_at"]), p["name"], p.get("category_name") or "",
-                                l.get("shop_name"), REGION_LABELS.get(l.get("region"), ""), r["price"],
+                                l.get("shop_name"), _where(l), r["price"],
                                 r["currency"], None if r["in_stock"] is None else ("Ναι" if r["in_stock"] else "Όχι"),
                                 r["error"] or "", r["screenshot"] or "", l["url"]])
                 if r["screenshot"]:
@@ -204,9 +210,10 @@ def export_settings_xlsx(settings: dict, shops: list[dict], out_path: Path) -> P
     _autowidth(ws, 70)
 
     ws = wb.create_sheet("Καταστήματα")
-    _header(ws, ["Όνομα", "Διεύθυνση", "Περιοχή", "URL αναζήτησης", "Αναζήτηση", "Προϊόντα"])
+    _header(ws, ["Όνομα", "Διεύθυνση", "Χώρα", "Περιοχή", "URL αναζήτησης", "Αναζήτηση", "Προϊόντα"])
     for s in shops:
-        ws.append([s["name"], s["domain"], REGION_LABELS.get(s["region"], s["region"]), s.get("search_url") or "",
+        ws.append([s["name"], s["domain"], country_label(s.get("country")), REGION_LABELS.get(s["region"], s["region"]),
+                   s.get("search_url") or "",
                    "Ναι" if s.get("search_enabled") else "Όχι", s.get("used", 0)])
     ws.auto_filter.ref = ws.dimensions
     _autowidth(ws, 80)

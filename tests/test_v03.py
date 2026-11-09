@@ -26,17 +26,17 @@ class FakeWorker:
 def test_shops_add_delete(tmp_path):
     db = Database(tmp_path / "db.sqlite")
     c = create_app(db, FakeWorker(), tmp_path).test_client()
-    r = c.post("/api/shops", json={"name": "Germanos", "domain": "https://www.germanos.gr/", "region": "GR",
-                                   "search_url": "https://www.germanos.gr/search?q={q}"})
+    r = c.post("/api/shops", json={"name": "MyShop", "domain": "https://www.myshop.gr/", "region": "GR",
+                                   "search_url": "https://www.myshop.gr/search?q={q}"})
     assert r.status_code == 200, r.json
     sid = r.json["id"]
     sh = next(s for s in c.get("/api/shops").json if s["id"] == sid)
-    assert sh["domain"] == "germanos.gr" and sh["search_enabled"] == 1 and sh["used"] == 0
-    assert c.post("/api/shops", json={"name": "Dup", "domain": "germanos.gr"}).status_code == 400
+    assert sh["domain"] == "myshop.gr" and sh["search_enabled"] == 1 and sh["used"] == 0
+    assert c.post("/api/shops", json={"name": "Dup", "domain": "myshop.gr"}).status_code == 400
     assert c.post("/api/shops", json={"name": "X", "domain": "x.gr", "search_url": "https://x.gr/s"}).status_code == 400
     # Διαγραφή καταστήματος σε χρήση: χρειάζεται επιβεβαίωση
     pid = db.create_product("P")
-    db.add_listing(pid, "https://www.germanos.gr/p/1")
+    db.add_listing(pid, "https://www.myshop.gr/p/1")
     assert c.delete(f"/api/shops/{sid}").status_code == 400
     assert c.delete(f"/api/shops/{sid}?listings=1").status_code == 200
     assert db.list_listings(pid) == []

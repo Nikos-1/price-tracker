@@ -97,19 +97,19 @@ def test_settings_export_import(tmp_path):
     db = Database(tmp_path / "db.sqlite")
     c = create_app(db, FakeWorker(), tmp_path).test_client()
     c.put("/api/settings", json={"check_interval_hours": 4, "email_to": "me@example.com", "smtp_password": "x" * 16})
-    c.post("/api/shops", json={"name": "Germanos", "domain": "germanos.gr", "region": "GR",
-                               "search_url": "https://www.germanos.gr/search?q={q}"})
+    c.post("/api/shops", json={"name": "MyShop", "domain": "myshop.gr", "region": "GR",
+                               "search_url": "https://www.myshop.gr/search?q={q}"})
     r = c.post("/api/settings/export", json={"format": "json"}).json
     data = json.loads(Path(r["path"]).read_text(encoding="utf-8"))
     assert data["settings"]["check_interval_hours"] == 4 and data["settings"]["email_to"] == "me@example.com"
     assert "x" * 16 not in Path(r["path"]).read_text(encoding="utf-8")
     assert "smtp_password_plain" not in data["settings"]
-    assert any(s["domain"] == "germanos.gr" for s in data["shops"])
+    assert any(s["domain"] == "myshop.gr" for s in data["shops"])
 
     x = c.post("/api/settings/export", json={"format": "xlsx"}).json
     wb = load_workbook(x["path"])
     assert wb.sheetnames == ["Ρυθμίσεις", "Καταστήματα"]
-    assert any(row[0].value == "Germanos" for row in wb["Καταστήματα"].iter_rows(min_row=2))
+    assert any(row[0].value == "MyShop" for row in wb["Καταστήματα"].iter_rows(min_row=2))
     assert c.get("/api/settings/export?format=xlsx").status_code == 200
 
     # Εισαγωγή σε καινούργια βάση
@@ -121,7 +121,7 @@ def test_settings_export_import(tmp_path):
     assert r.status_code == 200, r.json
     assert r.json["shops_added"] == 1
     assert db2.get_settings()["check_interval_hours"] == 4
-    assert db2.shop_by_domain("germanos.gr") and not db2.shop_by_domain("bad.gr")
+    assert db2.shop_by_domain("myshop.gr") and not db2.shop_by_domain("bad.gr")
     bad = c2.post("/api/settings/import", content_type="multipart/form-data",
                   data={"file": (io.BytesIO(b"{}"), "x.json")})
     assert bad.status_code == 400
@@ -203,6 +203,6 @@ def test_add_shop_without_search_url_starts_detection(tmp_path):
     db = Database(tmp_path / "db.sqlite")
     w = W()
     c = create_app(db, w, tmp_path).test_client()
-    r = c.post("/api/shops", json={"name": "Germanos", "domain": "germanos.gr", "region": "GR"}).json
+    r = c.post("/api/shops", json={"name": "MyShop", "domain": "myshop.gr", "region": "GR"}).json
     assert r["detecting"] and w.jobs == [("detect_search", {"shop_id": r["id"]})]
     assert c.get(f"/api/shops/{r['id']}/detect").json["state"] == "queued"
