@@ -549,7 +549,8 @@ async function renderSettings() {
     <td><input data-f="name" value="${esc(sh.name)}"></td>
     <td class="hint">${esc(sh.domain)}${sh.used ? `<div>${sh.used} ${sh.used === 1 ? "προϊόν" : "προϊόντα"}</div>` : ""}</td>
     <td>${regionSel(sh.region)}</td>
-    <td><input data-f="search_url" value="${esc(sh.search_url || "")}" placeholder="https://.../search?q={q}"></td>
+    <td><input data-f="search_url" value="${esc(sh.search_url || "")}" placeholder="https://.../search?q={q}">
+      <div class="hint" data-detect-msg></div>${sh.search_url ? "" : `<button class="link" data-detect="${sh.id}">🔍 Αυτόματη εύρεση</button>`}</td>
     <td style="text-align:center"><input type="checkbox" data-f="search_enabled" ${sh.search_enabled ? "checked" : ""}></td>
     <td><button class="small danger" data-del-shop="${sh.id}" title="Διαγραφή καταστήματος">🗑</button></td></tr>`;
   const shopRows = shops.map(shopRow).join("");
@@ -598,7 +599,7 @@ async function renderSettings() {
       <div class="two"><div><label>Όνομα</label><input id="ns-name" placeholder="π.χ. Germanos"></div>
         <div><label>Διεύθυνση (site)</label><input id="ns-domain" placeholder="π.χ. www.germanos.gr"></div></div>
       <div class="two"><div><label>Περιοχή</label>${regionSel("GR", 'id="ns-region"')}</div>
-        <div><label>URL αναζήτησης (προαιρετικό)</label><input id="ns-url" placeholder="https://www.germanos.gr/search?q={q}"></div></div>
+        <div><label>URL αναζήτησης (προαιρετικό: αν το αφήσεις κενό, το ψάχνω μόνος μου)</label><input id="ns-url" placeholder="https://www.germanos.gr/search?q={q}"></div></div>
       <p class="hint">Για το URL αναζήτησης: κάνε μια αναζήτηση στο site, αντίγραψε τη διεύθυνση και βάλε {q} στη θέση της λέξης που έψαξες.</p>
       <button id="ns-add">+ Προσθήκη καταστήματος</button>
       <button id="s-shops-xlsx" style="margin-left:8px">⬇ Λίστα καταστημάτων σε Excel</button>
@@ -640,6 +641,33 @@ async function renderSettings() {
           toast("Το κατάστημα διαγράφηκε");
         }));
         bindDel(m);
+        // Αυτόματη εύρεση URL αναζήτησης: γίνεται στο παρασκήνιο, εδώ απλώς παρακολουθούμε το αποτέλεσμα
+        const watchDetect = (id) => {
+          const tr = m.querySelector(`tr[data-shop="${id}"]`);
+          if (!tr) return;
+          const msg = $("[data-detect-msg]", tr), btn = $("[data-detect]", tr);
+          if (btn) btn.style.display = "none";
+          msg.textContent = "🔍 Ψάχνω μόνος μου το URL αναζήτησης…";
+          let tries = 0;
+          const tick = async () => {
+            if (!document.body.contains(tr)) return;
+            const st = await api("GET", `/api/shops/${id}/detect`).catch(() => null);
+            if (st && ["found", "guessed", "notfound"].includes(st.state)) {
+              if (st.search_url) { $("[data-f=search_url]", tr).value = st.search_url; $("[data-f=search_enabled]", tr).checked = !!st.search_enabled; }
+              msg.textContent = (st.state === "found" ? "✔ " : st.state === "guessed" ? "⚠ " : "✕ ") + st.message;
+              if (st.state === "notfound" && btn) btn.style.display = "";
+              return;
+            }
+            if (++tries < 120) setTimeout(tick, 3000);
+            else msg.textContent = "Η εύρεση αργεί. Δες ξανά αργότερα.";
+          };
+          setTimeout(tick, 2000);
+        };
+        const bindDetect = (root) => root.querySelectorAll("[data-detect]").forEach((b) => b.onclick = () => run(async () => {
+          await api("POST", `/api/shops/${b.dataset.detect}/detect`);
+          watchDetect(+b.dataset.detect);
+        }));
+        bindDetect(m);
         const selRows = () => [...m.querySelectorAll("tr[data-shop]")].filter((tr) => $("[data-sel]", tr).checked);
         const syncSel = () => {
           const n = selRows().length, all = m.querySelectorAll("tr[data-shop]").length;
@@ -672,8 +700,10 @@ async function renderSettings() {
           const tr = tmp.firstElementChild;
           $("#s-shops", m).appendChild(tr);
           bindDel(tr);
+          bindDetect(tr);
           ["#ns-name", "#ns-domain", "#ns-url"].forEach((x) => ($(x, m).value = ""));
-          toast(`Προστέθηκε το ${sh.name}`);
+          toast(`Προστέθηκε το ${sh.name}` + (r.detecting ? ". Ψάχνω μόνος μου το URL αναζήτησης." : ""));
+          if (r.detecting) watchDetect(r.id);
         });
         $("#s-upd-check", m).onclick = () => run(async () => {
           await api("POST", "/api/update/check");

@@ -12,10 +12,17 @@ from pathlib import Path
 from . import analysis, notifier
 from .browser import Browser
 from .extract import extract
-from .search import build_query, find_candidates, search_url
+from .search import (build_query, find_candidates, looks_like_search_results, search_url,
+                     search_url_candidates)
 from .shops import REGION_LABELS, host_of
 
 log = logging.getLogger(__name__)
+
+
+def _common_paths():
+    from .search import COMMON_SEARCH_PATHS
+
+    return COMMON_SEARCH_PATHS
 
 
 def _slug(text: str, n=40) -> str:
@@ -32,6 +39,7 @@ class Worker:
         self.notify_callback = notify_callback  # π.χ. ειδοποίηση στο system tray
         self.status = {"running": False, "task": "", "progress": 0, "total": 0,
                        "last_run": None, "next_run": None, "last_error": None, "log": []}
+        self.detect: dict[int, dict] = {}  # shop_id → κατάσταση αυτόματης εύρεσης URL αναζήτησης
         self._stop = threading.Event()
         self._queued_keys: set = set()
         self._lock = threading.Lock()
@@ -111,6 +119,8 @@ class Worker:
                     self.new_product(kw["product_id"], kw.get("search", True))
                 elif kind == "search_product":
                     self.search_product(kw["product_id"])
+                elif kind == "detect_search":
+                    self.detect_search(kw["shop_id"])
                 self.status["last_error"] = None
             except Exception as e:  # noqa: BLE001
                 log.exception("job failed")
@@ -330,6 +340,60 @@ class Worker:
                 self.db.update_product(product_id, name=titled[0]["title"][:150])
         if search:
             self.search_product(product_id)
+
+    def detect_search(self, shop_id: int, word: str = "samsung"):
+        """Βρίσκει μόνο του το URL αναζήτησης ενός καταστήματος από την αρχική του σελίδα."""
+        shop = self.db.get_shop(shop_id)
+        if not shop:
+            return
+        st = self.detect[shop_id] = {"state": "running", "message": "Αναζήτηση…"}
+        self.status.update(task=f"Εύρεση αναζήτησης στο {shop['name']}", progress=0, total=0)
+        found = guess = None
+        try:
+            with self._browser() as br:
+                home = None
+                for url in (f"https://www.{shop['domain']}/", f"https://{shop['domain']}/", f"http://{shop['domain']}/"):
+                    try:
+                        page, res = br.open(url)
+                        page.close()
+                        if res.html and (not res.status or res.status < 400):
+                            home = res
+                            break
+                    except Exception as e:  # noqa: BLE001
+                        self._log(f"{url}: {e}")
+                if home is None:
+                    raise RuntimeError("Δεν άνοιξε η αρχική σελίδα του καταστήματος")
+                cands = search_url_candidates(home.html, home.final_url)
+                structured = [c for c in cands if not any(c.endswith(p) for p in _common_paths())]
+                guess = structured[0] if structured else None
+                self.status["total"] = min(len(cands), 8)
+                for i, tmpl in enumerate(cands[:8], 1):
+                    if self._stop.is_set():
+                        break
+                    self.status["progress"] = i
+                    try:
+                        page, res = br.open(search_url(tmpl, word), timeout_ms=30000)
+                        page.close()
+                    except Exception:  # noqa: BLE001
+                        continue
+                    if (not res.status or res.status < 400) and looks_like_search_results(
+                            res.html, res.final_url, word, home.final_url):
+                        found = tmpl
+                        break
+        except Exception as e:  # noqa: BLE001
+            st.update(state="notfound", message=f"Δεν βρέθηκε: {e}")
+            self._log(f"{shop['name']}: εύρεση αναζήτησης απέτυχε: {e}")
+            return
+        url = found or guess
+        if url and not (self.db.get_shop(shop_id) or {}).get("search_url"):
+            self.db.update_shop(shop_id, search_url=url, search_enabled=1)
+        if found:
+            st.update(state="found", url=url, message="Βρέθηκε και δοκιμάστηκε")
+        elif guess:
+            st.update(state="guessed", url=url, message="Βρέθηκε, αλλά δεν επιβεβαιώθηκε. Έλεγξέ το.")
+        else:
+            st.update(state="notfound", message="Δεν βρέθηκε. Πρόσθεσέ το με το χέρι.")
+        self._log(f"{shop['name']}: URL αναζήτησης: {url or 'δεν βρέθηκε'}")
 
     def search_product(self, product_id: int):
         product = self.db.get_product(product_id)

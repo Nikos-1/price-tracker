@@ -151,3 +151,45 @@ def test_bulk_delete_shops(tmp_path):
     keys = {s["key"] for s in db.list_shops()}
     assert not keys & {"plaisio", "kotsovolos", "amazon_de"} and "bestprice" in keys
     assert db.list_listings(pid) == [] and not shot.exists()
+
+
+def test_search_url_candidates():
+    from pricetracker.search import looks_like_search_results, search_url_candidates
+
+    jsonld = """<html><head><script type="application/ld+json">{"@context":"https://schema.org","@type":"WebSite",
+      "url":"https://www.shop.gr/","potentialAction":{"@type":"SearchAction",
+      "target":{"@type":"EntryPoint","urlTemplate":"https://www.shop.gr/search?term={search_term_string}"},
+      "query-input":"required name=search_term_string"}}</script></head><body></body></html>"""
+    c = search_url_candidates(jsonld, "https://www.shop.gr/")
+    assert c[0] == "https://www.shop.gr/search?term={q}"
+
+    form = """<html><body><form action="/en/zoeken" method="get" class="newsletter"><input name="email"></form>
+      <form action="/el/anazitisi" class="search-form"><input type="hidden" name="lang" value="el">
+      <input type="search" name="kw"></form></body></html>"""
+    c = search_url_candidates(form, "https://shop.gr/")
+    assert c[0] == "https://shop.gr/el/anazitisi?lang=el&kw={q}"
+    assert "https://shop.gr/search?q={q}" in c  # και τα συνηθισμένα μοτίβα, για δοκιμή
+
+    other = '<form action="https://tracker.example.com/s"><input type="search" name="q"></form>'
+    assert not any("example.com" in x for x in search_url_candidates(other, "https://shop.gr/"))
+
+    res = "<html><title>Αποτελέσματα για samsung</title><body>" + "x" * 600 + "samsung samsung</body></html>"
+    assert looks_like_search_results(res, "https://shop.gr/search?q=samsung", "samsung", "https://shop.gr/")
+    assert not looks_like_search_results(res, "https://shop.gr/", "samsung", "https://shop.gr/")
+
+
+def test_add_shop_without_search_url_starts_detection(tmp_path):
+    class W(FakeWorker):
+        def __init__(self):
+            self.detect, self.jobs = {}, []
+
+        def enqueue(self, kind, **kw):
+            self.jobs.append((kind, kw))
+            return True
+
+    db = Database(tmp_path / "db.sqlite")
+    w = W()
+    c = create_app(db, w, tmp_path).test_client()
+    r = c.post("/api/shops", json={"name": "Germanos", "domain": "germanos.gr", "region": "GR"}).json
+    assert r["detecting"] and w.jobs == [("detect_search", {"shop_id": r["id"]})]
+    assert c.get(f"/api/shops/{r['id']}/detect").json["state"] == "queued"

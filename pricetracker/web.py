@@ -330,7 +330,32 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None):
         if url and "{q}" not in url:
             return err("Το URL αναζήτησης πρέπει να περιέχει {q} στη θέση του προϊόντος")
         sid = db.create_shop(name, region, domain, url, 1 if url else 0)
-        return jsonify({"id": sid})
+        detecting = False
+        if not url and hasattr(worker, "detect"):
+            worker.detect[sid] = {"state": "queued", "message": "Σε αναμονή…"}
+            detecting = worker.enqueue("detect_search", shop_id=sid)
+        return jsonify({"id": sid, "detecting": detecting})
+
+    @app.post("/api/shops/<int:sid>/detect")
+    def detect_shop_search(sid):
+        if not db.get_shop(sid):
+            abort(404)
+        if not hasattr(worker, "detect"):
+            return err("Δεν είναι διαθέσιμο")
+        db.update_shop(sid, search_url="", search_enabled=0)
+        worker.detect[sid] = {"state": "queued", "message": "Σε αναμονή…"}
+        worker.enqueue("detect_search", shop_id=sid)
+        return jsonify({"ok": True})
+
+    @app.get("/api/shops/<int:sid>/detect")
+    def detect_shop_status(sid):
+        sh = db.get_shop(sid)
+        if not sh:
+            abort(404)
+        st = dict(getattr(worker, "detect", {}).get(sid) or {"state": "none"})
+        st["search_url"] = sh.get("search_url") or ""
+        st["search_enabled"] = sh.get("search_enabled")
+        return jsonify(st)
 
     @app.post("/api/shops/delete")
     def delete_shops():
