@@ -9,7 +9,7 @@ from flask import Flask, abort, jsonify, request, send_file, send_from_directory
 import json
 import re
 
-from . import analysis, notifier, warranty
+from . import analysis, notifier, receipts, warranty
 from .export import export_xlsx
 from .shops import REGION_LABELS
 
@@ -34,6 +34,7 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None):
     app.config["MAX_CONTENT_LENGTH"] = MAX_RECEIPT_BYTES + 1024 * 1024
     app.config["JSON_AS_ASCII"] = False
     data_dir = Path(data_dir)
+    receipts.organize_all(db, data_dir)  # παλιές αποδείξεις → Αποδείξεις\<έτος>\<ημ/νία> <κατάστημα> - <προϊόντα>
 
     def err(msg, code=400):
         return jsonify({"error": msg}), code
@@ -187,6 +188,9 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None):
         if "notes" in b:
             fields["notes"] = b["notes"]
         db.update_product(pid, **fields)
+        p = db.get_product(pid)
+        if "name" in fields and p and p.get("receipt_id"):
+            receipts.organize(db, data_dir, p["receipt_id"])
         return jsonify({"ok": True})
 
     @app.post("/api/products/<int:pid>/purchased")
@@ -239,7 +243,8 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None):
     # ------------------------------------------------------------ shops
     @app.get("/api/shops")
     def shops():
-        return jsonify([{**s, "region_label": REGION_LABELS.get(s["region"], "")} for s in db.list_shops()])
+        return jsonify([{**s, "region_label": REGION_LABELS.get(s["region"], ""), "used": db.shop_usage(s["id"])}
+                        for s in db.list_shops()])
 
     @app.put("/api/shops/<int:sid>")
     def update_shop(sid):
@@ -254,11 +259,30 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None):
     @app.post("/api/shops")
     def create_shop():
         b = request.get_json() or {}
-        if not b.get("domain") or not b.get("name"):
-            return err("Χρειάζεται όνομα και domain (π.χ. example.gr)")
-        sid = db.create_shop(b["name"], b.get("region", "GR"), b["domain"], b.get("search_url", ""),
-                             1 if b.get("search_url") else 0)
+        name = (b.get("name") or "").strip()
+        raw = (b.get("domain") or "").strip()
+        if not name or not raw:
+            return err("Χρειάζεται όνομα και διεύθυνση καταστήματος (π.χ. www.example.gr)")
+        from .shops import host_of
+
+        domain = host_of(raw if "://" in raw else "https://" + raw)
+        if not domain or "." not in domain:
+            return err("Μη έγκυρη διεύθυνση καταστήματος")
+        if db.shop_by_domain(domain):
+            return err(f"Υπάρχει ήδη κατάστημα για το {domain}")
+        region = b.get("region") or "GR"
+        if region not in REGION_LABELS:
+            return err("Άγνωστη περιοχή")
+        url = (b.get("search_url") or "").strip()
+        if url and "{q}" not in url:
+            return err("Το URL αναζήτησης πρέπει να περιέχει {q} στη θέση του προϊόντος")
+        sid = db.create_shop(name, region, domain, url, 1 if url else 0)
         return jsonify({"id": sid})
+
+    @app.delete("/api/shops/<int:sid>")
+    def delete_shop(sid):
+        db.delete_shop(sid, delete_listings=request.args.get("listings") == "1")
+        return jsonify({"ok": True})
 
     # ------------------------------------------------------------ settings
     @app.get("/api/settings")
@@ -311,7 +335,7 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None):
             raise ValueError("Η απόδειξη πρέπει να είναι PDF ή εικόνα (JPG, PNG κ.λπ.)")
         safe = re.sub(r"[^\w\-.]+", "_", Path(name).stem, flags=re.UNICODE)[:60] or "receipt"
         year = (when or datetime.now().strftime("%Y"))[:4]
-        rel = Path("receipts") / year / f"{datetime.now():%Y%m%d_%H%M%S}_{safe}{ext}"
+        rel = Path(receipts.RECEIPTS_DIR) / year / f"{datetime.now():%Y%m%d_%H%M%S}_{safe}{ext}"
         dest = data_dir / rel
         dest.parent.mkdir(parents=True, exist_ok=True)
         file_storage.save(dest)
@@ -364,6 +388,8 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None):
                 fields["receipt_id"] = receipt_id
             db.update_product(int(pid), **fields)
             done.append(int(pid))
+        if receipt_id:
+            receipts.organize(db, data_dir, receipt_id)
         return jsonify({"ok": True, "products": done, "receipt_id": receipt_id})
 
     @app.post("/api/products/<int:pid>/receipt")
@@ -378,6 +404,7 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None):
         others = [int(x) for x in request.form.getlist("also") if x.isdigit()]
         for x in [pid] + others:
             db.update_product(x, receipt_id=rid)
+        receipts.organize(db, data_dir, rid)
         return jsonify({"ok": True, "receipt_id": rid})
 
     @app.put("/api/products/<int:pid>/warranty")

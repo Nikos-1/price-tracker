@@ -35,6 +35,45 @@ jobs:
           Stop-Process -Id $p.Id -Force
       - name: Build exe
         run: pyinstaller PriceTracker.spec --noconfirm
+      - name: Version
+        id: ver
+        shell: pwsh
+        run: |
+          $v = python -c "import pricetracker; print(pricetracker.__version__)"
+          "version=$v" >> $env:GITHUB_OUTPUT
+          $exists = git ls-remote --tags origin "refs/tags/v$v"
+          "exists=$([bool]$exists)".ToLower() >> $env:GITHUB_OUTPUT
+      - name: Installer (Inno Setup)
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress | Out-Null }
+          try {
+            Invoke-WebRequest -UseBasicParsing -Uri "https://raw.githubusercontent.com/jrsoftware/issrc/main/Files/Languages/Unofficial/Greek.isl" -OutFile installer\Greek.isl
+          } catch { Write-Host "Greek.isl not available, English installer texts" }
+          & $iscc "/DMyAppVersion=${{ steps.ver.outputs.version }}" installer\PriceTracker.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
+          (Get-FileHash dist\PriceTracker-Setup.exe -Algorithm SHA256).Hash.ToLower() + "  PriceTracker-Setup.exe" | Out-File -Encoding ascii -NoNewline dist\PriceTracker-Setup.exe.sha256
+      - name: Test installer (silent install + start + uninstall)
+        shell: pwsh
+        run: |
+          $dir = "$env:RUNNER_TEMP\pt-install"
+          Start-Process dist\PriceTracker-Setup.exe -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/CURRENTUSER","/DIR=$dir" -Wait
+          if (-not (Test-Path "$dir\PriceTracker.exe")) { throw "not installed" }
+          if (-not (Test-Path "$dir\unins000.exe")) { throw "no uninstaller" }
+          $env:PRICETRACKER_PORT = "48398"
+          $p = Start-Process "$dir\PriceTracker.exe" -ArgumentList "--tray","--no-check","--data","$env:RUNNER_TEMP\pt2" -PassThru
+          $ok = $false
+          for ($i = 0; $i -lt 30; $i++) {
+            Start-Sleep -Seconds 2
+            try { $r = Invoke-RestMethod http://127.0.0.1:48398/api/status; if ($r.version) { $ok = $true; break } } catch {}
+          }
+          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+          if (-not $ok) { Get-Content "$env:RUNNER_TEMP\pt2\app.log" -ErrorAction SilentlyContinue; throw "installed exe did not start" }
+          Write-Host "Installed exe started, version $($r.version)"
+          Start-Process "$dir\unins000.exe" -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES" -Wait
+          Start-Sleep -Seconds 3
+          if (Test-Path "$dir\PriceTracker.exe") { throw "uninstall left the exe" }
       - name: Zip
         shell: pwsh
         run: |
@@ -46,14 +85,8 @@ jobs:
           path: |
             PriceTracker-windows.zip
             PriceTracker-windows.zip.sha256
-      - name: Version
-        id: ver
-        shell: pwsh
-        run: |
-          $v = python -c "import pricetracker; print(pricetracker.__version__)"
-          "version=$v" >> $env:GITHUB_OUTPUT
-          $exists = git ls-remote --tags origin "refs/tags/v$v"
-          "exists=$([bool]$exists)".ToLower() >> $env:GITHUB_OUTPUT
+            dist/PriceTracker-Setup.exe
+            dist/PriceTracker-Setup.exe.sha256
       # Κάθε νέα έκδοση (αλλαγή του __version__) που φτάνει στο main γίνεται Release.
       # Από εκεί την κατεβάζει η αυτόματη ενημέρωση της εφαρμογής.
       - name: Release
@@ -65,5 +98,7 @@ jobs:
           target_commitish: ${{ github.sha }}
           generate_release_notes: true
           files: |
+            dist/PriceTracker-Setup.exe
+            dist/PriceTracker-Setup.exe.sha256
             PriceTracker-windows.zip
             PriceTracker-windows.zip.sha256

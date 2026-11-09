@@ -258,7 +258,7 @@ def from_amazon(soup, html: str) -> ProductInfo:
     p = ProductInfo()
     if "validateCaptcha" in html or "/errors/validateCaptcha" in html or \
             "api-services-support@amazon.com" in html:
-        p.blocked = "Η Amazon ζήτησε επιβεβαίωση (captcha). Δοκίμασε με «Εμφάνιση browser» στις Ρυθμίσεις."
+        p.blocked = "Η Amazon ζήτησε επιβεβαίωση (captcha)"
         return p
     p.title = _sel_text(soup, "#productTitle", "#title") or None
     price_txt = _sel_text(
@@ -348,6 +348,20 @@ def from_generic(soup) -> ProductInfo:
     return p
 
 
+CHALLENGE_MARKERS = ["cf-challenge", "challenge-platform", "cf-turnstile", "g-recaptcha", "h-captcha",
+                     "px-captcha", "captcha-delivery.com", "/_incapsula_resource", "datadome"]
+CHALLENGE_TITLES = ["just a moment", "attention required", "verify you are human", "are you a robot",
+                    "access denied", "security check", "robot check", "bot verification"]
+
+
+def _looks_like_challenge(soup, html: str) -> bool:
+    low = html[:200000].lower()
+    title = (soup.title.get_text() if soup.title else "").strip().lower()
+    if any(t in title for t in CHALLENGE_TITLES):
+        return True
+    return any(m in low for m in CHALLENGE_MARKERS) and len(soup.get_text(" ").split()) < 400
+
+
 def extract(html: str, url: str = "") -> ProductInfo:
     soup = BeautifulSoup(html, "html.parser")
     host = host_of(url)
@@ -362,6 +376,9 @@ def extract(html: str, url: str = "") -> ProductInfo:
     info.merge(from_jsonld(soup), "jsonld")
     info.merge(from_meta(soup), "meta")
     info.merge(from_generic(soup), "generic")
+    if info.price is None and _looks_like_challenge(soup, html):
+        info.blocked = "Το κατάστημα ζήτησε επιβεβαίωση ότι δεν είσαι ρομπότ (captcha)"
+        return info
     if info.in_stock is None and info.price is not None:
         body = soup.body.get_text(" ") if soup.body else ""
         info.in_stock = availability_from_text(body[:20000])

@@ -205,7 +205,7 @@ async function markPurchased(p) {
     <div><label>Εγγύηση</label>${warrantyInput("main", 24)}</div></div>
     <div class="section"><h3>Θέλεις να ανεβάσεις την απόδειξη ή το τιμολόγιο;</h3>
       <input type="file" id="pp-file" accept="${ACCEPT_RECEIPT}">
-      <div class="hint">PDF ή φωτογραφία, προαιρετικό. Αποθηκεύεται στον φάκελο της εφαρμογής, στο «receipts».</div>
+      <div class="hint">PDF ή φωτογραφία, προαιρετικό. Αποθηκεύεται στα Έγγραφα\\PriceTracker\\Αποδείξεις, με όνομα την ημερομηνία, το κατάστημα και τα προϊόντα.</div>
       <label class="inline" style="margin-top:12px"><input type="checkbox" id="pp-multi"> Η απόδειξη περιέχει κι άλλα προϊόντα</label>
       <div id="pp-others" style="display:none">
         ${others.length ? `<p class="hint">Διάλεξε όσα είναι στην ίδια απόδειξη. Το καθένα κρατάει τη δική του τιμή και εγγύηση.</p>
@@ -274,6 +274,7 @@ async function renderWarranties() {
     : r.warranty_state === "soon" ? `<span class="chip warn">Λήγει σε ${r.warranty_days_left} μέρες</span>`
     : `<span class="chip ok">Σε ισχύ, ${r.warranty_days_left} μέρες</span>`;
   main.innerHTML = `<h2 style="margin-top:0">Εγγυήσεις και αποδείξεις</h2>
+    <p class="hint">Οι αποδείξεις βρίσκονται και στα Έγγραφα\\PriceTracker\\Αποδείξεις. <button class="link" id="open-receipts">Άνοιγμα φακέλου</button></p>
     <div class="section"><table>
     <tr><th>Προϊόν</th><th>Αγορά</th><th>Εγγύηση</th><th>Λήξη</th><th>Απόδειξη</th><th></th></tr>
     ${rows.map((r) => `<tr>
@@ -281,11 +282,12 @@ async function renderWarranties() {
       <td>${r.purchased_at ? new Date(r.purchased_at + "T00:00:00").toLocaleDateString("el-GR") : "–"}<div class="hint">${esc(r.purchased_shop || "")} ${r.purchased_price ? eur(r.purchased_price) : ""}</div></td>
       <td>${esc(r.warranty_label)}</td>
       <td>${r.warranty_end ? new Date(r.warranty_end + "T00:00:00").toLocaleDateString("el-GR") : "–"}<div>${chip(r)}</div></td>
-      <td>${r.receipt_id ? `<button class="small" data-open-r="${r.receipt_id}">📄 Άνοιγμα</button><div class="hint">${esc(r.receipt_name || "")}</div>`
+      <td>${r.receipt_id ? `<button class="small" data-open-r="${r.receipt_id}">📄 Άνοιγμα</button><div class="hint">${esc((r.receipt_file || "").split("/").pop())}</div>`
         : `<button class="small" data-up="${r.id}">⬆ Ανέβασμα</button>`}</td>
       <td style="white-space:nowrap"><button class="small" data-ew="${r.id}">✎</button>
         <button class="small" data-unbuy="${r.id}" title="Ξανά παρακολούθηση τιμής">↺</button></td></tr>`).join("")}
     </table></div>`;
+  $("#open-receipts").onclick = () => api("POST", "/api/open-folder", { sub: "Αποδείξεις" });
   main.querySelectorAll("[data-open-r]").forEach((b) => b.onclick = () => run(async () => {
     const r = await api("POST", `/api/receipts/${b.dataset.openR}/open`);
     if (!r.opened && r.url) window.open(r.url, "_blank");
@@ -502,11 +504,15 @@ function drawChart(p) {
 async function openSettings() {
   const s = await api("GET", "/api/settings");
   const shops = await api("GET", "/api/shops");
-  const shopRows = shops.map((sh) => `<tr data-shop="${sh.id}">
+  const regionSel = (r, attr = 'data-f="region"') => `<select ${attr}><option value="GR" ${r === "GR" ? "selected" : ""}>Ελλάδα</option><option value="EU" ${r === "EU" ? "selected" : ""}>Ε.Ε.</option><option value="OTHER" ${r === "OTHER" ? "selected" : ""}>Άλλο</option></select>`;
+  const shopRow = (sh) => `<tr data-shop="${sh.id}">
     <td><input data-f="name" value="${esc(sh.name)}"></td>
-    <td><select data-f="region"><option value="GR" ${sh.region === "GR" ? "selected" : ""}>Ελλάδα</option><option value="EU" ${sh.region === "EU" ? "selected" : ""}>Ε.Ε.</option><option value="OTHER" ${sh.region === "OTHER" ? "selected" : ""}>Άλλο</option></select></td>
+    <td class="hint">${esc(sh.domain)}${sh.used ? `<div>${sh.used} ${sh.used === 1 ? "προϊόν" : "προϊόντα"}</div>` : ""}</td>
+    <td>${regionSel(sh.region)}</td>
     <td><input data-f="search_url" value="${esc(sh.search_url || "")}" placeholder="https://.../search?q={q}"></td>
-    <td style="text-align:center"><input type="checkbox" data-f="search_enabled" ${sh.search_enabled ? "checked" : ""}></td></tr>`).join("");
+    <td style="text-align:center"><input type="checkbox" data-f="search_enabled" ${sh.search_enabled ? "checked" : ""}></td>
+    <td><button class="small danger" data-del-shop="${sh.id}" title="Διαγραφή καταστήματος">🗑</button></td></tr>`;
+  const shopRows = shops.map(shopRow).join("");
   modal(`<h2>Ρυθμίσεις</h2>
     <div class="section"><h3>Έλεγχοι</h3>
       <div class="two"><div><label>Κάθε πόσες ώρες (κανονικά)</label><input id="s-int" type="number" min="0.25" step="0.25" value="${s.check_interval_hours}"></div>
@@ -514,7 +520,10 @@ async function openSettings() {
       <label class="inline"><input type="checkbox" id="s-bfauto" ${s.bf_window_auto ? "checked" : ""}> Περίοδος Black Friday αυτόματα: 20/11 έως 2/12</label>
       <div class="two" id="s-bfdates"><div><label>Αρχή (ΜΜ-ΗΗ)</label><input id="s-bfs" value="${esc(s.bf_start || "11-20")}"></div><div><label>Τέλος (ΜΜ-ΗΗ)</label><input id="s-bfe" value="${esc(s.bf_end || "12-02")}"></div></div>
       <label>Screenshots</label><select id="s-shot"><option value="changes" ${s.screenshot_mode === "changes" ? "selected" : ""}>Όταν αλλάζει τιμή ή διαθεσιμότητα (και πάντα στην περίοδο Black Friday)</option><option value="always" ${s.screenshot_mode === "always" ? "selected" : ""}>Σε κάθε έλεγχο</option></select>
-      <label class="inline"><input type="checkbox" id="s-headless" ${s.headless ? "" : "checked"}> Εμφάνιση του browser κατά τον έλεγχο (βοηθά αν η Amazon ζητά captcha)</label>
+      <label>Παράθυρο browser κατά τους ελέγχους</label><select id="s-bmode">
+        <option value="auto" ${s.browser_mode === "auto" ? "selected" : ""}>Κρυφό· ανοίγει μόνο όταν χρειάζεται ενέργειά σου (π.χ. captcha)</option>
+        <option value="hidden" ${s.browser_mode === "hidden" ? "selected" : ""}>Πάντα κρυφό (οι σελίδες με captcha παραλείπονται)</option>
+        <option value="visible" ${s.browser_mode === "visible" ? "selected" : ""}>Πάντα ορατό</option></select>
     </div>
     <div class="section"><h3>Ειδοποιήσεις email</h3>
       <label class="inline"><input type="checkbox" id="s-email" ${s.email_enabled ? "checked" : ""}> Αποστολή email</label>
@@ -540,7 +549,14 @@ async function openSettings() {
     </div>
     <div class="section"><h3>Καταστήματα</h3>
       <p class="hint">Η «Αναζήτηση» χρησιμοποιεί το URL αναζήτησης κάθε καταστήματος ({q} = το προϊόν). Καταστήματα από links που προσθέτεις μπαίνουν εδώ αυτόματα.</p>
-      <table><tr><th>Όνομα</th><th>Περιοχή</th><th>URL αναζήτησης</th><th>Αναζήτηση</th></tr>${shopRows}</table>
+      <table id="s-shops"><tr><th>Όνομα</th><th>Διεύθυνση</th><th>Περιοχή</th><th>URL αναζήτησης</th><th>Αναζήτηση</th><th></th></tr>${shopRows}</table>
+      <h3 style="margin-top:16px">Προσθήκη καταστήματος</h3>
+      <div class="two"><div><label>Όνομα</label><input id="ns-name" placeholder="π.χ. Germanos"></div>
+        <div><label>Διεύθυνση (site)</label><input id="ns-domain" placeholder="π.χ. www.germanos.gr"></div></div>
+      <div class="two"><div><label>Περιοχή</label>${regionSel("GR", 'id="ns-region"')}</div>
+        <div><label>URL αναζήτησης (προαιρετικό)</label><input id="ns-url" placeholder="https://www.germanos.gr/search?q={q}"></div></div>
+      <p class="hint">Για το URL αναζήτησης: κάνε μια αναζήτηση στο site, αντίγραψε τη διεύθυνση και βάλε {q} στη θέση της λέξης που έψαξες.</p>
+      <button id="ns-add">+ Προσθήκη καταστήματος</button>
     </div>
     <div class="btns"><button data-close>Άκυρο</button><button class="primary" id="s-save">Αποθήκευση</button></div>`,
     { wide: true, onMount: (m, close) => {
@@ -554,6 +570,31 @@ async function openSettings() {
         };
         $("#s-prov", m).onchange = syncProv; syncProv();
         $("#s-folder", m).onclick = () => api("POST", "/api/open-folder", {});
+        const bindDel = (root) => root.querySelectorAll("[data-del-shop]").forEach((b) => b.onclick = () => run(async () => {
+          const id = +b.dataset.delShop;
+          const sh = (await api("GET", "/api/shops")).find((x) => x.id === id);
+          if (!sh) return b.closest("tr").remove();
+          const text = sh.used
+            ? `Το «${esc(sh.name)}» χρησιμοποιείται σε <b>${sh.used}</b> ${sh.used === 1 ? "προϊόν" : "προϊόντα"}. Αν το διαγράψεις, θα σβηστούν και οι τιμές και το ιστορικό του σε αυτά τα προϊόντα.`
+            : `Να διαγραφεί το κατάστημα «${esc(sh.name)}»;`;
+          if (!(await confirmBox("Διαγραφή καταστήματος", text, "Διαγραφή", true))) return;
+          await api("DELETE", `/api/shops/${id}?listings=${sh.used ? 1 : 0}`);
+          b.closest("tr").remove();
+          toast("Το κατάστημα διαγράφηκε");
+        }));
+        bindDel(m);
+        $("#ns-add", m).onclick = () => run(async () => {
+          const body = { name: $("#ns-name", m).value, domain: $("#ns-domain", m).value, region: $("#ns-region", m).value, search_url: $("#ns-url", m).value };
+          const r = await api("POST", "/api/shops", body);
+          const sh = (await api("GET", "/api/shops")).find((x) => x.id === r.id);
+          const tmp = document.createElement("tbody");
+          tmp.innerHTML = shopRow(sh);
+          const tr = tmp.firstElementChild;
+          $("#s-shops", m).appendChild(tr);
+          bindDel(tr);
+          ["#ns-name", "#ns-domain", "#ns-url"].forEach((x) => ($(x, m).value = ""));
+          toast(`Προστέθηκε το ${sh.name}`);
+        });
         $("#s-upd-check", m).onclick = () => run(async () => {
           await api("POST", "/api/update/check");
           $("#s-upd-msg", m).textContent = "Έλεγχος…";
@@ -568,7 +609,7 @@ async function openSettings() {
           const body = {
             check_interval_hours: $("#s-int", m).value, bf_interval_hours: $("#s-bfint", m).value,
             bf_window_auto: $("#s-bfauto", m).checked, bf_start: $("#s-bfs", m).value, bf_end: $("#s-bfe", m).value,
-            screenshot_mode: $("#s-shot", m).value, headless: !$("#s-headless", m).checked,
+            screenshot_mode: $("#s-shot", m).value, browser_mode: $("#s-bmode", m).value,
             email_enabled: $("#s-email", m).checked, smtp_provider: $("#s-prov", m).value, smtp_user: $("#s-user", m).value.trim(),
             email_to: $("#s-to", m).value.trim(), smtp_host: $("#s-host", m).value.trim(), smtp_port: $("#s-port", m).value,
             notify_back_in_stock: $("#s-n1", m).checked, notify_target_price: $("#s-n2", m).checked, notify_new_low: $("#s-n3", m).checked,
