@@ -1,0 +1,492 @@
+"use strict";
+// ---------------------------------------------------------------- βοηθητικά
+const $ = (s, el = document) => el.querySelector(s);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const eur = (v, cur) => (v == null ? "–" : v.toLocaleString("el-GR", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " " + (cur && cur !== "EUR" ? cur : "€"));
+const fmtDate = (s) => (s ? new Date(s.replace(" ", "T")).toLocaleString("el-GR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" }) : "–");
+
+async function api(method, url, body) {
+  const r = await fetch(url, { method, headers: body ? { "Content-Type": "application/json" } : {}, body: body ? JSON.stringify(body) : undefined });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || "Σφάλμα " + r.status);
+  return data;
+}
+function toast(msg, ms = 3500) {
+  const t = $("#toast");
+  t.textContent = msg;
+  t.classList.remove("hidden");
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => t.classList.add("hidden"), ms);
+}
+async function run(fn) {
+  try { return await fn(); } catch (e) { toast("⚠ " + e.message, 6000); }
+}
+
+function modal(html, { wide = false, onMount } = {}) {
+  const root = $("#modal-root");
+  const bg = document.createElement("div");
+  bg.className = "modal-bg";
+  bg.innerHTML = `<div class="modal ${wide ? "wide" : ""}">${html}</div>`;
+  const close = () => bg.remove();
+  bg.addEventListener("mousedown", (e) => { if (e.target === bg) close(); });
+  bg.querySelectorAll("[data-close]").forEach((b) => b.addEventListener("click", close));
+  root.appendChild(bg);
+  if (onMount) onMount(bg.querySelector(".modal"), close);
+  const first = bg.querySelector("input,select,textarea");
+  if (first) first.focus();
+  return close;
+}
+function confirmBox(title, text, okLabel = "Ναι", danger = false) {
+  return new Promise((resolve) => {
+    modal(`<h2>${esc(title)}</h2><p>${text}</p>
+      <div class="btns"><button data-close id="cb-no">Άκυρο</button><button class="${danger ? "danger" : "primary"}" id="cb-ok">${esc(okLabel)}</button></div>`,
+      { onMount: (m, close) => {
+          $("#cb-ok", m).onclick = () => { close(); resolve(true); };
+          $("#cb-no", m).onclick = () => resolve(false);
+        } });
+  });
+}
+
+// ---------------------------------------------------------------- κατάσταση
+const state = { category: "all", purchased: "0", view: "list", productId: null, categories: [], status: {} };
+
+// ---------------------------------------------------------------- κατηγορίες
+async function loadCategories() {
+  state.categories = await api("GET", "/api/categories");
+  const ul = $("#categories");
+  const items = [{ id: "all", name: "Όλες" }, ...state.categories, { id: 0, name: "Χωρίς κατηγορία" }];
+  ul.innerHTML = items.map((c) => `
+    <li data-id="${c.id}" class="${String(state.category) === String(c.id) ? "active" : ""}">
+      <span>${esc(c.name)}</span>
+      ${c.product_count != null ? `<span class="n">${c.product_count}</span>` : ""}
+      ${typeof c.id === "number" && c.id > 0 ? `<span class="ops"><button title="Μετονομασία" data-edit="${c.id}">✎</button><button title="Διαγραφή" data-del="${c.id}">🗑</button></span>` : ""}
+    </li>`).join("");
+  ul.querySelectorAll("li").forEach((li) => li.addEventListener("click", (e) => {
+    if (e.target.closest("button")) return;
+    state.category = li.dataset.id;
+    state.view = "list";
+    loadCategories(); render();
+  }));
+  ul.querySelectorAll("[data-edit]").forEach((b) => b.onclick = () => editCategory(+b.dataset.edit));
+  ul.querySelectorAll("[data-del]").forEach((b) => b.onclick = () => deleteCategory(+b.dataset.del));
+}
+function categoryForm(title, name, onSave) {
+  modal(`<h2>${esc(title)}</h2><label>Όνομα</label><input id="cat-name" value="${esc(name)}" placeholder="π.χ. Τροφοδοτικά (PSU)">
+    <div class="btns"><button data-close>Άκυρο</button><button class="primary" id="cat-save">Αποθήκευση</button></div>`,
+    { onMount: (m, close) => {
+        const save = () => run(async () => { await onSave($("#cat-name", m).value); close(); await loadCategories(); render(); });
+        $("#cat-save", m).onclick = save;
+        $("#cat-name", m).onkeydown = (e) => { if (e.key === "Enter") save(); };
+      } });
+}
+const addCategory = () => categoryForm("Νέα κατηγορία", "", (name) => api("POST", "/api/categories", { name }));
+function editCategory(id) {
+  const c = state.categories.find((x) => x.id === id);
+  categoryForm("Μετονομασία κατηγορίας", c.name, (name) => api("PUT", "/api/categories/" + id, { name }));
+}
+function deleteCategory(id) {
+  const c = state.categories.find((x) => x.id === id);
+  modal(`<h2>Διαγραφή κατηγορίας «${esc(c.name)}»</h2>
+    <p>Η κατηγορία έχει ${c.product_count} προϊόντα. Τι να γίνουν;</p>
+    <label class="inline"><input type="radio" name="dc" value="0" checked> Να μείνουν χωρίς κατηγορία</label>
+    <label class="inline"><input type="radio" name="dc" value="1"> Να διαγραφούν κι αυτά (μαζί με το ιστορικό τους)</label>
+    <div class="btns"><button data-close>Άκυρο</button><button class="danger" id="dc-ok">Διαγραφή</button></div>`,
+    { onMount: (m, close) => {
+        $("#dc-ok", m).onclick = () => run(async () => {
+          const withProducts = m.querySelector("input[name=dc]:checked").value;
+          await api("DELETE", `/api/categories/${id}?products=${withProducts}`);
+          close();
+          if (String(state.category) === String(id)) state.category = "all";
+          await loadCategories(); render();
+        });
+      } });
+}
+function categoryOptions(selected) {
+  return `<option value="">— Χωρίς κατηγορία —</option>` +
+    state.categories.map((c) => `<option value="${c.id}" ${c.id === selected ? "selected" : ""}>${esc(c.name)}</option>`).join("");
+}
+
+// ---------------------------------------------------------------- λίστα προϊόντων
+async function renderList() {
+  const q = new URLSearchParams({ category: state.category, purchased: state.purchased });
+  const products = await api("GET", "/api/products?" + q);
+  const main = $("#main");
+  if (!products.length) {
+    main.innerHTML = `<div class="empty"><p>Δεν υπάρχουν προϊόντα εδώ.</p>
+      <p>Πάτα <b>«+ Προσθήκη προϊόντος»</b> και επικόλλησε το link από ένα κατάστημα (BestPrice, Plaisio, Amazon…).</p></div>`;
+    return;
+  }
+  main.innerHTML = `<div class="grid">${products.map(cardHtml).join("")}</div>`;
+  main.querySelectorAll("[data-open]").forEach((el) => el.onclick = () => openProduct(+el.dataset.open));
+  main.querySelectorAll("[data-act]").forEach((b) => b.onclick = () => productAction(b.dataset.act, +b.dataset.id, products.find((p) => p.id === +b.dataset.id)));
+}
+function priceBox(label, b) {
+  return `<div class="price-box"><div class="lbl">${label}</div>
+    <div class="val">${b ? eur(b.price) : "–"}</div><div class="shop">${b ? esc(b.shop) : "δεν βρέθηκε διαθέσιμο"}</div></div>`;
+}
+function cardHtml(p) {
+  const chips = [];
+  if (p.purchased) chips.push(`<span class="chip ok">✔ Αγοράστηκε${p.purchased_price ? " " + eur(p.purchased_price) : ""}</span>`);
+  else if (p.any_in_stock) chips.push(`<span class="chip ok">Διαθέσιμο</span>`);
+  else if (p.last_checked) chips.push(`<span class="chip bad">Μη διαθέσιμο</span>`);
+  else chips.push(`<span class="chip">Αναμονή ελέγχου…</span>`);
+  if (p.target_price) chips.push(`<span class="chip">Στόχος ${eur(p.target_price)}</span>`);
+  if (p.candidate_count) chips.push(`<span class="chip warn">${p.candidate_count} ${p.candidate_count === 1 ? "πρόταση" : "προτάσεις"} για επιβεβαίωση</span>`);
+  if (p.error_count) chips.push(`<span class="chip bad">${p.error_count} ${p.error_count === 1 ? "σφάλμα" : "σφάλματα"} ελέγχου</span>`);
+  return `<div class="card">
+    <div class="title" data-open="${p.id}">${p.image_url ? `<img src="${esc(p.image_url)}" alt="" onerror="this.remove()">` : ""}<span>${esc(p.name)}</span></div>
+    <div class="meta">${esc(p.category_name || "Χωρίς κατηγορία")} · ${p.listing_count} καταστήματα · Χαμηλότερη ποτέ: ${eur(p.min_ever)}</div>
+    <div class="prices">${priceBox("Ελλάδα", p.best.GR)}${priceBox("Ε.Ε.", p.best.EU)}</div>
+    <div class="row">${chips.join("")}</div>
+    <div class="meta">Τελευταίος έλεγχος: ${fmtDate(p.last_checked)}</div>
+    <div class="row">
+      <button class="small" data-open="${p.id}">Λεπτομέρειες</button>
+      <button class="small" data-act="edit" data-id="${p.id}">✎ Τροποποίηση</button>
+      <button class="small" data-act="${p.purchased ? "unbuy" : "buy"}" data-id="${p.id}">${p.purchased ? "↺ Ξανά παρακολούθηση" : "✔ Αγοράστηκε"}</button>
+      <button class="small danger" data-act="delete" data-id="${p.id}">🗑</button>
+    </div></div>`;
+}
+
+async function productAction(act, id, p) {
+  if (act === "edit") return editProduct(p);
+  if (act === "buy") return markPurchased(p);
+  if (act === "unbuy") return run(async () => { await api("POST", `/api/products/${id}/purchased`, { purchased: false }); refresh(); });
+  if (act === "delete") {
+    if (await confirmBox("Διαγραφή προϊόντος", `Να διαγραφεί το «${esc(p.name)}» μαζί με όλο το ιστορικό τιμών του; (Τα screenshots μένουν στον φάκελο.)`, "Διαγραφή", true)) {
+      await run(() => api("DELETE", "/api/products/" + id));
+      if (state.view === "detail") state.view = "list";
+      refresh();
+    }
+  }
+}
+function editProduct(p) {
+  modal(`<h2>Τροποποίηση προϊόντος</h2>
+    <label>Όνομα</label><input id="ep-name" value="${esc(p.name)}">
+    <div class="two"><div><label>Κατηγορία</label><select id="ep-cat">${categoryOptions(p.category_id)}</select></div>
+    <div><label>Τιμή-στόχος (€)</label><input id="ep-target" value="${p.target_price ?? ""}" placeholder="π.χ. 99,90"></div></div>
+    <label>Σημειώσεις</label><textarea id="ep-notes" rows="3">${esc(p.notes || "")}</textarea>
+    <div class="btns"><button data-close>Άκυρο</button><button class="primary" id="ep-save">Αποθήκευση</button></div>`,
+    { onMount: (m, close) => {
+        $("#ep-save", m).onclick = () => run(async () => {
+          await api("PUT", "/api/products/" + p.id, { name: $("#ep-name", m).value, category_id: $("#ep-cat", m).value,
+            target_price: $("#ep-target", m).value, notes: $("#ep-notes", m).value });
+          close(); refresh();
+        });
+      } });
+}
+function markPurchased(p) {
+  const shops = [p.best?.GR, p.best?.EU].filter(Boolean);
+  const best = shops.sort((a, b) => a.price - b.price)[0];
+  modal(`<h2>Αγοράστηκε: ${esc(p.name)}</h2>
+    <p class="hint">Τα αγορασμένα προϊόντα σταματούν να ελέγχονται. Το ιστορικό κρατιέται.</p>
+    <div class="two"><div><label>Τιμή αγοράς (€)</label><input id="pp-price" value="${best ? best.price : ""}"></div>
+    <div><label>Ημερομηνία</label><input id="pp-date" type="date" value="${new Date().toISOString().slice(0, 10)}"></div></div>
+    <label>Κατάστημα</label><input id="pp-shop" value="${esc(best ? best.shop : "")}">
+    <div class="btns"><button data-close>Άκυρο</button><button class="primary" id="pp-save">✔ Αγοράστηκε</button></div>`,
+    { onMount: (m, close) => {
+        $("#pp-save", m).onclick = () => run(async () => {
+          await api("POST", `/api/products/${p.id}/purchased`, { purchased: true, price: $("#pp-price", m).value,
+            date: $("#pp-date", m).value, shop: $("#pp-shop", m).value });
+          close(); refresh(); toast("Σημειώθηκε ως αγορασμένο");
+        });
+      } });
+}
+
+function addProduct() {
+  modal(`<h2>Προσθήκη προϊόντος</h2>
+    <label>Link προϊόντος από κατάστημα</label>
+    <input id="ap-url" placeholder="https://www.bestprice.gr/item/... ή https://www.amazon.de/dp/...">
+    <div class="hint">Η εφαρμογή θα διαβάσει όνομα και τιμή από τη σελίδα και μετά θα ψάξει το ίδιο προϊόν στα άλλα καταστήματα. Οι αντιστοιχίες που βρίσκει εμφανίζονται για επιβεβαίωση.</div>
+    <label>Όνομα (προαιρετικό – συμπληρώνεται αυτόματα)</label><input id="ap-name" placeholder="π.χ. Corsair RM850x">
+    <div class="two"><div><label>Κατηγορία</label><select id="ap-cat">${categoryOptions(typeof state.category === "string" && +state.category > 0 ? +state.category : null)}</select></div>
+    <div><label>Τιμή-στόχος (€, προαιρετικό)</label><input id="ap-target" placeholder="π.χ. 99,90"></div></div>
+    <label class="inline"><input type="checkbox" id="ap-search" checked> Αναζήτηση και στα άλλα καταστήματα</label>
+    <div class="btns"><button data-close>Άκυρο</button><button class="primary" id="ap-save">Προσθήκη</button></div>`,
+    { onMount: (m, close) => {
+        $("#ap-save", m).onclick = () => run(async () => {
+          const r = await api("POST", "/api/products", { url: $("#ap-url", m).value, name: $("#ap-name", m).value,
+            category_id: $("#ap-cat", m).value, target_price: $("#ap-target", m).value, search: $("#ap-search", m).checked });
+          close(); toast("Προστέθηκε. Γίνεται ο πρώτος έλεγχος…");
+          await loadCategories(); openProduct(r.id);
+        });
+      } });
+}
+
+// ---------------------------------------------------------------- λεπτομέρειες προϊόντος
+let chart;
+async function openProduct(id) {
+  state.view = "detail"; state.productId = id;
+  await renderDetail();
+}
+async function renderDetail() {
+  const p = await api("GET", "/api/products/" + state.productId);
+  const main = $("#main");
+  const groups = { GR: [], EU: [], OTHER: [] };
+  p.listings.forEach((l) => (groups[l.region] || groups.OTHER).push(l));
+  const listingRows = (arr) => arr.map((l) => `<tr>
+      <td><a href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.shop_name)}</a><div class="hint">${esc((l.title || "").slice(0, 90))}</div></td>
+      <td class="num"><b>${eur(l.last_price, l.last_currency)}</b></td>
+      <td>${l.last_in_stock == null ? "–" : l.last_in_stock ? '<span class="chip ok">Ναι</span>' : '<span class="chip bad">Όχι</span>'}
+          ${l.last_error ? `<div class="err">${esc(l.last_error)}</div>` : ""}</td>
+      <td class="num">${eur(l.analysis.min_30)}<div class="hint">συνήθης ${eur(l.analysis.median_30)}</div></td>
+      <td class="verdict ${l.analysis.verdict}">${esc(l.analysis.label)}</td>
+      <td>${l.last_screenshot ? `<img class="thumb" src="/shots/${encodeURI(l.last_screenshot.replaceAll("\\", "/"))}" data-shot="${esc(l.last_screenshot)}" alt="screenshot">` : "–"}</td>
+      <td class="num">${fmtDate(l.last_checked)}</td>
+      <td><button class="small" data-check-l="${l.id}" title="Έλεγχος τώρα">⟳</button>
+          <button class="small danger" data-del-l="${l.id}" title="Αφαίρεση καταστήματος">✕</button></td></tr>`).join("");
+  const table = (title, arr) => arr.length ? `<div class="section"><h3>${title}</h3><table>
+      <tr><th>Κατάστημα</th><th>Τιμή</th><th>Διαθέσιμο</th><th>Χαμηλότερη 30 ημ.</th><th>Εκτίμηση προσφοράς</th><th>Screenshot</th><th>Έλεγχος</th><th></th></tr>
+      ${listingRows(arr)}</table></div>` : "";
+  const cands = p.candidates.length ? `<div class="section"><h3>Πιθανές αντιστοιχίες σε άλλα καταστήματα (${p.candidates.length})</h3>
+      <p class="hint">Η εφαρμογή τα βρήκε με αναζήτηση. Πάτα ✔ αν είναι το ίδιο προϊόν (ίδιο μοντέλο), αλλιώς ✕.</p><table>
+      <tr><th>Κατάστημα</th><th>Τίτλος</th><th></th></tr>
+      ${p.candidates.map((c) => `<tr><td>${esc(c.shop_name)} <span class="chip">${esc(c.region_label)}</span></td>
+        <td><a href="${esc(c.url)}" target="_blank" rel="noopener">${esc(c.title || c.url)}</a></td>
+        <td style="white-space:nowrap"><button class="small primary" data-acc="${c.id}">✔ Είναι αυτό</button> <button class="small" data-rej="${c.id}">✕</button></td></tr>`).join("")}
+      </table></div>` : "";
+  const shotsRows = p.history.filter((h) => h.screenshot).slice(-40).reverse();
+  main.innerHTML = `<div class="detail">
+    <button class="link" id="back">← Πίσω στη λίστα</button>
+    <h2>${esc(p.name)}</h2>
+    <div class="meta">${esc(p.category_name || "Χωρίς κατηγορία")} ${p.ean ? "· EAN " + esc(p.ean) : ""} ${p.mpn ? "· Κωδ. " + esc(p.mpn) : ""}
+      ${p.target_price ? "· Στόχος " + eur(p.target_price) : ""} ${p.purchased ? `· <b>Αγοράστηκε ${esc(p.purchased_at || "")} ${p.purchased_price ? eur(p.purchased_price) : ""} ${esc(p.purchased_shop || "")}</b>` : ""}</div>
+    ${p.notes ? `<p>${esc(p.notes)}</p>` : ""}
+    <div class="row" style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
+      <button id="d-check">⟳ Έλεγχος τώρα</button>
+      <button id="d-search">🔍 Αναζήτηση σε άλλα καταστήματα</button>
+      <button id="d-add-link">+ Πρόσθεσε link καταστήματος</button>
+      <button id="d-export">⬇ Excel</button>
+      <button data-act="edit">✎ Τροποποίηση</button>
+      <button data-act="${p.purchased ? "unbuy" : "buy"}">${p.purchased ? "↺ Ξανά παρακολούθηση" : "✔ Αγοράστηκε"}</button>
+      <button class="danger" data-act="delete">🗑 Διαγραφή</button>
+    </div>
+    <div class="prices" style="margin-top:12px;max-width:520px">${priceBox("Καλύτερη τιμή Ελλάδα", p.best.GR)}${priceBox("Καλύτερη τιμή Ε.Ε.", p.best.EU)}</div>
+    ${cands}
+    <div class="section"><h3>Εξέλιξη τιμής</h3>
+      ${p.history.some((h) => h.price) ? `<div class="chart-wrap"><canvas id="chart"></canvas></div>
+      <p class="hint">Οι κάθετες γραμμές δείχνουν Black Friday / Cyber Monday. Μια προσφορά είναι πραγματική αν η τιμή είναι κάτω από τη χαμηλότερη των προηγούμενων εβδομάδων, όχι μόνο κάτω από μια «αρχική» τιμή.</p>`
+      : `<p class="hint">Δεν υπάρχουν ακόμα τιμές. Ο πρώτος έλεγχος μπορεί να πάρει λίγα λεπτά.</p>`}
+    </div>
+    ${table("🇬🇷 Ελλάδα", groups.GR)}${table("🇪🇺 Ευρωπαϊκή Ένωση", groups.EU)}${table("Άλλα", groups.OTHER)}
+    ${shotsRows.length ? `<div class="section"><h3>Screenshots (αρχείο αναφοράς)</h3><table>
+      <tr><th>Ημερομηνία</th><th>Κατάστημα</th><th>Τιμή</th><th></th></tr>
+      ${shotsRows.map((h) => `<tr><td>${fmtDate(h.checked_at)}</td><td>${esc(h.shop_name)}</td><td class="num">${eur(h.price, h.currency)}</td>
+        <td><button class="small" data-shot="${esc(h.screenshot)}">Προβολή</button></td></tr>`).join("")}
+      </table><button class="link" id="open-shots">Άνοιγμα φακέλου screenshots</button></div>` : ""}
+  </div>`;
+  $("#back").onclick = () => { state.view = "list"; render(); };
+  $("#d-check").onclick = () => run(async () => { await api("POST", "/api/check", { product_id: p.id }); toast("Ο έλεγχος ξεκίνησε"); });
+  $("#d-search").onclick = () => run(async () => { await api("POST", `/api/products/${p.id}/search`); toast("Η αναζήτηση ξεκίνησε. Τα αποτελέσματα θα εμφανιστούν εδώ."); });
+  $("#d-export").onclick = () => exportXlsx(p.id);
+  $("#d-add-link").onclick = () => addLink(p.id);
+  const op = $("#open-shots"); if (op) op.onclick = () => api("POST", "/api/open-folder", { sub: "screenshots" });
+  main.querySelectorAll("[data-act]").forEach((b) => b.onclick = () => productAction(b.dataset.act, p.id, p));
+  main.querySelectorAll("[data-acc]").forEach((b) => b.onclick = () => run(async () => { await api("POST", `/api/listings/${b.dataset.acc}/accept`); renderDetail(); }));
+  main.querySelectorAll("[data-rej]").forEach((b) => b.onclick = () => run(async () => { await api("POST", `/api/listings/${b.dataset.rej}/reject`); renderDetail(); }));
+  main.querySelectorAll("[data-check-l]").forEach((b) => b.onclick = () => run(async () => { await api("POST", "/api/check", { product_id: p.id }); toast("Ο έλεγχος ξεκίνησε"); }));
+  main.querySelectorAll("[data-del-l]").forEach((b) => b.onclick = async () => {
+    if (await confirmBox("Αφαίρεση καταστήματος", "Να αφαιρεθεί αυτό το κατάστημα και το ιστορικό του από το προϊόν;", "Αφαίρεση", true)) {
+      await run(() => api("DELETE", "/api/listings/" + b.dataset.delL)); renderDetail();
+    }
+  });
+  main.querySelectorAll("[data-shot]").forEach((el) => el.onclick = () => showShot(el.dataset.shot));
+  drawChart(p);
+}
+function addLink(pid) {
+  modal(`<h2>Πρόσθεσε link καταστήματος</h2><label>Link του ίδιου προϊόντος σε άλλο κατάστημα</label><input id="al-url" placeholder="https://...">
+    <div class="btns"><button data-close>Άκυρο</button><button class="primary" id="al-save">Προσθήκη</button></div>`,
+    { onMount: (m, close) => {
+        $("#al-save", m).onclick = () => run(async () => { await api("POST", `/api/products/${pid}/listings`, { url: $("#al-url", m).value }); close(); renderDetail(); toast("Προστέθηκε, γίνεται έλεγχος…"); });
+      } });
+}
+function showShot(path) {
+  modal(`<img class="full" src="/shots/${encodeURI(path.replaceAll("\\", "/"))}" alt="screenshot"><div class="btns"><button data-close>Κλείσιμο</button></div>`, { wide: true });
+}
+
+const COLORS = ["#2563eb", "#dc2626", "#16a34a", "#d97706", "#7c3aed", "#0891b2", "#db2777", "#4b5563", "#65a30d", "#ea580c"];
+const eventLines = {
+  id: "eventLines",
+  afterDraw(c, _a, opts) {
+    const x = c.scales.x; if (!x) return;
+    const ctx = c.ctx;
+    (opts.events || []).forEach((ev) => {
+      const px = x.getPixelForValue(new Date(ev.date + "T12:00:00").getTime());
+      if (px < x.left || px > x.right) return;
+      ctx.save(); ctx.strokeStyle = "rgba(220,38,38,.6)"; ctx.setLineDash([4, 4]);
+      ctx.beginPath(); ctx.moveTo(px, c.chartArea.top); ctx.lineTo(px, c.chartArea.bottom); ctx.stroke();
+      ctx.fillStyle = "rgba(220,38,38,.9)"; ctx.font = "11px Segoe UI"; ctx.fillText(ev.label, px + 4, c.chartArea.top + 12);
+      ctx.restore();
+    });
+  },
+};
+function drawChart(p) {
+  const cv = $("#chart"); if (!cv) return;
+  if (chart) chart.destroy();
+  const byListing = {};
+  p.history.forEach((h) => { if (h.price) (byListing[h.listing_id] ||= []).push({ x: new Date(h.checked_at.replace(" ", "T")).getTime(), y: h.price, s: h.in_stock }); });
+  const datasets = p.listings.filter((l) => byListing[l.id]).map((l, i) => ({
+    label: `${l.shop_name} (${l.region_label})`, data: byListing[l.id], borderColor: COLORS[i % COLORS.length],
+    backgroundColor: COLORS[i % COLORS.length], stepped: true, pointRadius: 2, borderWidth: 2,
+    segment: { borderDash: (ctx) => (ctx.p1.raw && ctx.p1.raw.s === 0 ? [3, 3] : undefined) },
+  }));
+  if (p.target_price) {
+    const xs = p.history.map((h) => new Date(h.checked_at.replace(" ", "T")).getTime());
+    datasets.push({ label: "Τιμή-στόχος", data: [{ x: Math.min(...xs), y: p.target_price }, { x: Math.max(...xs), y: p.target_price }],
+      borderColor: "#9ca3af", borderDash: [6, 4], pointRadius: 0, borderWidth: 1 });
+  }
+  // Δείξε και την επερχόμενη Black Friday / Cyber Monday στον άξονα
+  const allX = datasets.flatMap((d) => d.data.map((pt) => pt.x));
+  let xMax = Math.max(...allX);
+  const upcoming = p.events.map((e) => new Date(e.date + "T23:59:00").getTime()).filter((t) => t > xMax && t - Date.now() < 45 * 86400000);
+  if (upcoming.length) xMax = Math.max(...upcoming) + 86400000;
+  const dark = matchMedia("(prefers-color-scheme: dark)").matches;
+  Chart.defaults.color = dark ? "#9ca3af" : "#4b5563";
+  Chart.defaults.borderColor = dark ? "#2a2f38" : "#e5e7eb";
+  chart = new Chart(cv, {
+    type: "line", data: { datasets }, plugins: [eventLines],
+    options: { responsive: true, maintainAspectRatio: false, interaction: { mode: "nearest", intersect: false },
+      scales: { x: { type: "time", max: xMax, time: { tooltipFormat: "dd/MM/yyyy HH:mm", displayFormats: { day: "dd/MM", hour: "dd/MM HH:mm" } } },
+                y: { ticks: { callback: (v) => v + " €" } } },
+      plugins: { eventLines: { events: p.events },
+        tooltip: { callbacks: { label: (c) => `${c.dataset.label}: ${eur(c.parsed.y)}${c.raw.s === 0 ? " (μη διαθέσιμο)" : ""}` } } } },
+  });
+}
+
+// ---------------------------------------------------------------- ρυθμίσεις
+async function openSettings() {
+  const s = await api("GET", "/api/settings");
+  const shops = await api("GET", "/api/shops");
+  const shopRows = shops.map((sh) => `<tr data-shop="${sh.id}">
+    <td><input data-f="name" value="${esc(sh.name)}"></td>
+    <td><select data-f="region"><option value="GR" ${sh.region === "GR" ? "selected" : ""}>Ελλάδα</option><option value="EU" ${sh.region === "EU" ? "selected" : ""}>Ε.Ε.</option><option value="OTHER" ${sh.region === "OTHER" ? "selected" : ""}>Άλλο</option></select></td>
+    <td><input data-f="search_url" value="${esc(sh.search_url || "")}" placeholder="https://.../search?q={q}"></td>
+    <td style="text-align:center"><input type="checkbox" data-f="search_enabled" ${sh.search_enabled ? "checked" : ""}></td></tr>`).join("");
+  modal(`<h2>Ρυθμίσεις</h2>
+    <div class="section"><h3>Έλεγχοι</h3>
+      <div class="two"><div><label>Κάθε πόσες ώρες (κανονικά)</label><input id="s-int" type="number" min="0.25" step="0.25" value="${s.check_interval_hours}"></div>
+      <div><label>Κάθε πόσες ώρες στην περίοδο Black Friday</label><input id="s-bfint" type="number" min="0.25" step="0.25" value="${s.bf_interval_hours}"></div></div>
+      <label class="inline"><input type="checkbox" id="s-bfauto" ${s.bf_window_auto ? "checked" : ""}> Περίοδος Black Friday αυτόματα: 20/11 έως 2/12</label>
+      <div class="two" id="s-bfdates"><div><label>Αρχή (ΜΜ-ΗΗ)</label><input id="s-bfs" value="${esc(s.bf_start || "11-20")}"></div><div><label>Τέλος (ΜΜ-ΗΗ)</label><input id="s-bfe" value="${esc(s.bf_end || "12-02")}"></div></div>
+      <label>Screenshots</label><select id="s-shot"><option value="changes" ${s.screenshot_mode === "changes" ? "selected" : ""}>Όταν αλλάζει τιμή ή διαθεσιμότητα (και πάντα στην περίοδο Black Friday)</option><option value="always" ${s.screenshot_mode === "always" ? "selected" : ""}>Σε κάθε έλεγχο</option></select>
+      <label class="inline"><input type="checkbox" id="s-headless" ${s.headless ? "" : "checked"}> Εμφάνιση του browser κατά τον έλεγχο (βοηθά αν η Amazon ζητά captcha)</label>
+    </div>
+    <div class="section"><h3>Ειδοποιήσεις email</h3>
+      <label class="inline"><input type="checkbox" id="s-email" ${s.email_enabled ? "checked" : ""}> Αποστολή email</label>
+      <div class="two"><div><label>Πάροχος</label><select id="s-prov"><option value="gmail" ${s.smtp_provider === "gmail" ? "selected" : ""}>Gmail</option><option value="outlook" ${s.smtp_provider === "outlook" ? "selected" : ""}>Outlook / Hotmail</option><option value="custom" ${s.smtp_provider === "custom" ? "selected" : ""}>Άλλο (SMTP)</option></select></div>
+      <div><label>Λογαριασμός αποστολής</label><input id="s-user" value="${esc(s.smtp_user)}" placeholder="το-email-σου@gmail.com"></div></div>
+      <div class="two"><div><label>Κωδικός εφαρμογής (App Password) ${s.has_password ? "✔ αποθηκευμένος" : ""}</label><input id="s-pass" type="password" placeholder="${s.has_password ? "•••••••• (άφησέ το κενό για να μείνει ίδιος)" : "16 χαρακτήρες από τη Google"}"></div>
+      <div><label>Αποστολή ειδοποιήσεων σε</label><input id="s-to" value="${esc(s.email_to)}" placeholder="π.χ. και στο Hotmail σου"></div></div>
+      <div class="two" id="s-smtp"><div><label>SMTP server</label><input id="s-host" value="${esc(s.smtp_host)}"></div><div><label>Θύρα</label><input id="s-port" type="number" value="${s.smtp_port}"></div></div>
+      <p class="hint">Gmail: ενεργοποίησε την «Επαλήθευση σε 2 βήματα» και φτιάξε κωδικό στο myaccount.google.com/apppasswords. Ο κωδικός αποθηκεύεται στη Διαχείριση διαπιστευτηρίων των Windows.</p>
+      <label class="inline"><input type="checkbox" id="s-n1" ${s.notify_back_in_stock ? "checked" : ""}> Όταν ένα προϊόν γίνει διαθέσιμο</label>
+      <label class="inline"><input type="checkbox" id="s-n2" ${s.notify_target_price ? "checked" : ""}> Όταν φτάσει την τιμή-στόχο</label>
+      <label class="inline"><input type="checkbox" id="s-n3" ${s.notify_new_low ? "checked" : ""}> Όταν βρεθεί νέα χαμηλότερη τιμή</label>
+      <button id="s-test" style="margin-top:8px">Αποστολή δοκιμαστικού email</button>
+    </div>
+    <div class="section"><h3>Εφαρμογή</h3>
+      <label>Όταν πατάω το Χ</label><select id="s-close"><option value="ask" ${s.close_action === "ask" ? "selected" : ""}>Να ρωτάει</option><option value="tray" ${s.close_action === "tray" ? "selected" : ""}>Να μένει στο system tray</option><option value="exit" ${s.close_action === "exit" ? "selected" : ""}>Να κλείνει</option></select>
+      <label class="inline"><input type="checkbox" id="s-auto" ${s.start_with_windows ? "checked" : ""}> Εκκίνηση μαζί με τα Windows (στο system tray)</label>
+      <p class="hint">Φάκελος δεδομένων: <code>${esc(state.status.data_dir || "")}</code> <button class="link" id="s-folder">Άνοιγμα</button></p>
+    </div>
+    <div class="section"><h3>Καταστήματα</h3>
+      <p class="hint">Η «Αναζήτηση» χρησιμοποιεί το URL αναζήτησης κάθε καταστήματος ({q} = το προϊόν). Καταστήματα από links που προσθέτεις μπαίνουν εδώ αυτόματα.</p>
+      <table><tr><th>Όνομα</th><th>Περιοχή</th><th>URL αναζήτησης</th><th>Αναζήτηση</th></tr>${shopRows}</table>
+    </div>
+    <div class="btns"><button data-close>Άκυρο</button><button class="primary" id="s-save">Αποθήκευση</button></div>`,
+    { wide: true, onMount: (m, close) => {
+        const syncBf = () => ($("#s-bfdates", m).style.display = $("#s-bfauto", m).checked ? "none" : "");
+        $("#s-bfauto", m).onchange = syncBf; syncBf();
+        const presets = { gmail: ["smtp.gmail.com", 587], outlook: ["smtp-mail.outlook.com", 587] };
+        const syncProv = () => {
+          const pv = $("#s-prov", m).value;
+          $("#s-smtp", m).style.display = pv === "custom" ? "" : "none";
+          if (presets[pv]) { $("#s-host", m).value = presets[pv][0]; $("#s-port", m).value = presets[pv][1]; }
+        };
+        $("#s-prov", m).onchange = syncProv; syncProv();
+        $("#s-folder", m).onclick = () => api("POST", "/api/open-folder", {});
+        const collect = () => {
+          const body = {
+            check_interval_hours: $("#s-int", m).value, bf_interval_hours: $("#s-bfint", m).value,
+            bf_window_auto: $("#s-bfauto", m).checked, bf_start: $("#s-bfs", m).value, bf_end: $("#s-bfe", m).value,
+            screenshot_mode: $("#s-shot", m).value, headless: !$("#s-headless", m).checked,
+            email_enabled: $("#s-email", m).checked, smtp_provider: $("#s-prov", m).value, smtp_user: $("#s-user", m).value.trim(),
+            email_to: $("#s-to", m).value.trim(), smtp_host: $("#s-host", m).value.trim(), smtp_port: $("#s-port", m).value,
+            notify_back_in_stock: $("#s-n1", m).checked, notify_target_price: $("#s-n2", m).checked, notify_new_low: $("#s-n3", m).checked,
+            close_action: $("#s-close", m).value, start_with_windows: $("#s-auto", m).checked,
+          };
+          if ($("#s-pass", m).value) body.smtp_password = $("#s-pass", m).value.replace(/\s+/g, "");
+          return body;
+        };
+        const saveAll = async () => {
+          await api("PUT", "/api/settings", collect());
+          for (const tr of m.querySelectorAll("tr[data-shop]")) {
+            await api("PUT", "/api/shops/" + tr.dataset.shop, { name: $("[data-f=name]", tr).value, region: $("[data-f=region]", tr).value,
+              search_url: $("[data-f=search_url]", tr).value, search_enabled: $("[data-f=search_enabled]", tr).checked });
+          }
+        };
+        $("#s-test", m).onclick = () => run(async () => { await saveAll(); await api("POST", "/api/settings/test-email"); toast("Στάλθηκε! Έλεγξε τα εισερχόμενα."); });
+        $("#s-save", m).onclick = () => run(async () => { await saveAll(); close(); toast("Οι ρυθμίσεις αποθηκεύτηκαν"); refresh(); });
+      } });
+}
+
+// ---------------------------------------------------------------- export, status, κλείσιμο
+async function exportXlsx(productId) {
+  await run(async () => {
+    const r = await api("POST", "/api/export", productId ? { product_id: productId } : {});
+    if (r.opened) toast("Το Excel αποθηκεύτηκε και άνοιξε: " + r.path, 6000);
+    else window.location.href = "/api/export.xlsx" + (productId ? "?product=" + productId : "");
+  });
+}
+
+let lastRunning = false;
+async function pollStatus() {
+  try {
+    const s = await api("GET", "/api/status");
+    state.status = s;
+    const parts = [];
+    if (s.running) parts.push(`<span class="run">● ${esc(s.task || "Εργασία")} ${s.total ? `${s.progress}/${s.total}` : ""}</span>`);
+    parts.push(`Τελευταίος έλεγχος: ${s.last_run ? fmtDate(s.last_run) : "–"}`);
+    if (s.next_run) parts.push(`Επόμενος: ${fmtDate(s.next_run)}`);
+    parts.push(`κάθε ${String(s.interval_hours).replace(".", ",")} ώρ.${s.bf_mode ? " (Black Friday)" : ""}`);
+    $("#status").innerHTML = parts.join(" · ");
+    const bf = new Date(s.black_friday + "T00:00:00"), cm = new Date(s.cyber_monday + "T00:00:00");
+    const days = Math.ceil((bf - new Date()) / 86400000);
+    $("#bf-box").innerHTML = `<b>Black Friday:</b> ${bf.toLocaleDateString("el-GR")}<br><b>Cyber Monday:</b> ${cm.toLocaleDateString("el-GR")}<br>` +
+      (days > 0 ? `σε ${days} μέρες` : days > -4 ? "<b>Τώρα!</b>" : "") + (s.bf_mode ? "<br>Έλεγχοι κάθε " + s.interval_hours + " ώρα" : "");
+    if (lastRunning && !s.running) refresh();
+    lastRunning = s.running;
+  } catch (_) { /* ο server ξεκινά */ }
+  setTimeout(pollStatus, lastRunning ? 2000 : 5000);
+}
+
+// Καλείται από το παράθυρο της εφαρμογής όταν πατηθεί το Χ
+window.showCloseDialog = function () {
+  if (document.getElementById("close-dlg")) return;
+  modal(`<div id="close-dlg"><h2>Κλείσιμο Price Tracker</h2>
+    <p>Θέλεις να κλείσει η εφαρμογή ή να μείνει στο <b>system tray</b> για να συνεχίσει τους ελέγχους;</p>
+    <label class="inline"><input type="checkbox" id="cd-rem"> Να θυμάσαι την επιλογή μου</label>
+    <div class="btns"><button data-close>Άκυρο</button><button id="cd-exit" class="danger">Έξοδος</button><button id="cd-tray" class="primary">Παραμονή στο tray</button></div></div>`,
+    { onMount: (m, close) => {
+        const go = (choice) => { const remember = $("#cd-rem", m).checked; close(); api("POST", "/api/window/close-choice", { choice, remember }); };
+        $("#cd-exit", m).onclick = () => go("exit");
+        $("#cd-tray", m).onclick = () => go("tray");
+      } });
+};
+
+async function render() {
+  await run(async () => { state.view === "detail" ? await renderDetail() : await renderList(); });
+}
+async function refresh() { await run(loadCategories); await render(); }
+
+$("#btn-add").onclick = addProduct;
+$("#btn-check").onclick = () => run(async () => { await api("POST", "/api/check"); toast("Ο έλεγχος όλων ξεκίνησε"); });
+$("#btn-export").onclick = () => exportXlsx(null);
+$("#btn-settings").onclick = () => run(openSettings);
+$("#btn-add-cat").onclick = addCategory;
+document.querySelectorAll("#filter-tabs button").forEach((b) => b.onclick = () => {
+  document.querySelectorAll("#filter-tabs button").forEach((x) => x.classList.remove("active"));
+  b.classList.add("active"); state.purchased = b.dataset.f; state.view = "list"; render();
+});
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") { const bgs = document.querySelectorAll(".modal-bg"); if (bgs.length) bgs[bgs.length - 1].remove(); } });
+refresh();
+pollStatus();

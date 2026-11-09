@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="el">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Price Tracker</title>
+<link rel="stylesheet" href="/static/style.css">
+<script src="/static/chart.umd.min.js"></script>
+<script src="/static/chartjs-adapter-date-fns.bundle.min.js"></script>
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">🏷️ Price Tracker</div>
+  <div id="status" class="status">…</div>
+  <div class="actions">
+    <button class="primary" id="btn-add">+ Προσθήκη προϊόντος</button>
+    <button id="btn-check">⟳ Έλεγχος τώρα</button>
+    <button id="btn-export">⬇ Excel</button>
+    <button id="btn-settings">⚙ Ρυθμίσεις</button>
+  </div>
+</header>
+<div class="layout">
+  <aside class="sidebar">
+    <div class="tabs" id="filter-tabs">
+      <button data-f="0" class="active">Παρακολούθηση</button>
+      <button data-f="1">Αγορασμένα</button>
+      <button data-f="all">Όλα</button>
+    </div>
+    <h3>Κατηγορίες</h3>
+    <ul id="categories" class="cats"></ul>
+    <button class="link" id="btn-add-cat">+ Νέα κατηγορία</button>
+    <div class="bf-box" id="bf-box"></div>
+  </aside>
+  <main id="main"></main>
+</div>
+<div id="modal-root"></div>
+<div id="toast" class="toast hidden"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

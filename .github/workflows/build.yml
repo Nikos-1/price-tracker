@@ -1,0 +1,50 @@
+name: Build Windows app
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+      - name: Tests
+        run: python -m pytest -q
+      - name: Smoke test (server + database on Windows)
+        shell: pwsh
+        run: |
+          $env:PRICETRACKER_PORT = "48399"
+          $p = Start-Process python -ArgumentList "-m","pricetracker","--browser","--tray","--no-check","--data","$env:RUNNER_TEMP\pt" -PassThru
+          Start-Sleep -Seconds 8
+          $r = Invoke-RestMethod http://127.0.0.1:48399/api/status
+          if (-not $r.black_friday) { throw "status failed" }
+          Invoke-RestMethod http://127.0.0.1:48399/api/categories | Out-Null
+          Stop-Process -Id $p.Id -Force
+      - name: Build exe
+        run: pyinstaller PriceTracker.spec --noconfirm
+      - name: Zip
+        shell: pwsh
+        run: Compress-Archive -Path dist\PriceTracker\* -DestinationPath PriceTracker-windows.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PriceTracker-windows
+          path: PriceTracker-windows.zip
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: PriceTracker-windows.zip
