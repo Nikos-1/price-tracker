@@ -1,0 +1,9 @@
+flask>=3.0
+werkzeug>=3.0
+beautifulsoup4>=4.12
+playwright>=1.48
+openpyxl>=3.1
+pillow>=10.0
+pystray>=0.19
+pywebview>=5.0
+keyring>=25.0
