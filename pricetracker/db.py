@@ -152,6 +152,18 @@ class Database:
     def _seed(self, c):
         row = c.execute("SELECT value FROM settings WHERE key='deleted_shop_keys'").fetchone()
         deleted = set(json.loads(row["value"])) if row and row["value"] else set()
+        if not c.execute("SELECT 1 FROM settings WHERE key='removed_defaults_v04'").fetchone():
+            # Μία φορά: Amazon και MediaMarkt βγαίνουν από τη λίστα. Αν κάποιο χρησιμοποιείται ήδη σε προϊόν,
+            # μένει για εκείνο το προϊόν, αλλά δεν χρησιμοποιείται πια στην αναζήτηση νέων προϊόντων.
+            for key in shops_mod.REMOVED_DEFAULT_KEYS:
+                r = c.execute("SELECT id FROM shops WHERE key=?", (key,)).fetchone()
+                if not r:
+                    continue
+                if c.execute("SELECT 1 FROM listings WHERE shop_id=?", (r["id"],)).fetchone():
+                    c.execute("UPDATE shops SET search_enabled=0 WHERE id=?", (r["id"],))
+                else:
+                    c.execute("DELETE FROM shops WHERE id=?", (r["id"],))
+            c.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('removed_defaults_v04','true')")
         for s in shops_mod.DEFAULT_SHOPS:
             if s["key"] in deleted:
                 continue
@@ -207,13 +219,45 @@ class Database:
             except sqlite3.IntegrityError:
                 raise ValueError(f"Υπάρχει ήδη κατηγορία «{name}»")
 
-    def delete_category(self, cat_id: int, delete_products: bool = False):
+    def delete_category(self, cat_id: int) -> list[int]:
+        """Διαγράφει την κατηγορία. Επιστρέφει τα προϊόντα (μη αγορασμένα) που πρέπει να διαγραφούν μαζί της.
+        Τα αγορασμένα μένουν, χωρίς κατηγορία, για να φαίνονται η αγορά και η εγγύηση."""
         with self.conn() as c:
-            if delete_products:
-                c.execute("DELETE FROM products WHERE category_id=?", (cat_id,))
-            else:
-                c.execute("UPDATE products SET category_id=NULL WHERE category_id=?", (cat_id,))
+            ids = [r[0] for r in c.execute("SELECT id FROM products WHERE category_id=? AND purchased=0", (cat_id,))]
+            c.execute("UPDATE products SET category_id=NULL WHERE category_id=?", (cat_id,))
             c.execute("DELETE FROM categories WHERE id=?", (cat_id,))
+        return ids
+
+    def category_usage(self, cat_id: int) -> dict:
+        with self.conn() as c:
+            r = c.execute("""SELECT SUM(purchased=0) AS tracked, SUM(purchased=1) AS purchased
+                             FROM products WHERE category_id=?""", (cat_id,)).fetchone()
+        return {"tracked": r["tracked"] or 0, "purchased": r["purchased"] or 0}
+
+    def product_screenshots(self, product_id: int) -> set[str]:
+        with self.conn() as c:
+            rows = c.execute(
+                """SELECT h.screenshot FROM price_history h JOIN listings l ON l.id = h.listing_id
+                   WHERE l.product_id=? AND h.screenshot IS NOT NULL
+                   UNION SELECT last_screenshot FROM listings WHERE product_id=? AND last_screenshot IS NOT NULL""",
+                (product_id, product_id)).fetchall()
+        return {r[0] for r in rows}
+
+    def listing_screenshots(self, listing_ids) -> set[str]:
+        ids = list(listing_ids)
+        if not ids:
+            return set()
+        qs = ",".join("?" * len(ids))
+        with self.conn() as c:
+            rows = c.execute(
+                f"""SELECT screenshot FROM price_history WHERE listing_id IN ({qs}) AND screenshot IS NOT NULL
+                    UNION SELECT last_screenshot FROM listings WHERE id IN ({qs}) AND last_screenshot IS NOT NULL""",
+                (*ids, *ids)).fetchall()
+        return {r[0] for r in rows}
+
+    def shop_listing_ids(self, shop_id: int) -> list[int]:
+        with self.conn() as c:
+            return [r[0] for r in c.execute("SELECT id FROM listings WHERE shop_id=?", (shop_id,))]
 
     # ---------- shops ----------
     def list_shops(self):

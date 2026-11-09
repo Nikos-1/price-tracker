@@ -11,6 +11,9 @@ REGION_LABELS = {REGION_GR: "Ελλάδα", REGION_EU: "Ε.Ε.", REGION_OTHER: "
 
 # {q} αντικαθίσταται με το κείμενο αναζήτησης (URL-encoded).
 # Τα URL αναζήτησης μπορούν να αλλάξουν από τις Ρυθμίσεις αν κάποιο κατάστημα αλλάξει.
+# Προεπιλεγμένα καταστήματα που αφαιρέθηκαν σε νεότερη έκδοση (σβήνονται και από τις υπάρχουσες βάσεις)
+REMOVED_DEFAULT_KEYS = ("mediamarkt_gr", "amazon_de", "amazon_it", "amazon_fr", "amazon_es", "ebay_de")
+
 DEFAULT_SHOPS = [
     # --- Ελλάδα ---
     {"key": "bestprice", "name": "BestPrice", "region": REGION_GR, "domain": "bestprice.gr",
@@ -23,19 +26,7 @@ DEFAULT_SHOPS = [
      "search_url": "https://www.public.gr/search?text={q}"},
     {"key": "eshop", "name": "e-shop.gr", "region": REGION_GR, "domain": "e-shop.gr",
      "search_url": "https://www.e-shop.gr/search?q={q}"},
-    {"key": "mediamarkt_gr", "name": "MediaMarkt GR", "region": REGION_GR, "domain": "mediamarkt.gr",
-     "search_url": "https://www.mediamarkt.gr/search?query={q}"},
     # --- Ε.Ε. ---
-    {"key": "amazon_de", "name": "Amazon.de", "region": REGION_EU, "domain": "amazon.de",
-     "search_url": "https://www.amazon.de/s?k={q}"},
-    {"key": "amazon_it", "name": "Amazon.it", "region": REGION_EU, "domain": "amazon.it",
-     "search_url": "https://www.amazon.it/s?k={q}"},
-    {"key": "amazon_fr", "name": "Amazon.fr", "region": REGION_EU, "domain": "amazon.fr",
-     "search_url": "https://www.amazon.fr/s?k={q}"},
-    {"key": "amazon_es", "name": "Amazon.es", "region": REGION_EU, "domain": "amazon.es",
-     "search_url": "https://www.amazon.es/s?k={q}"},
-    {"key": "ebay_de", "name": "eBay.de", "region": REGION_EU, "domain": "ebay.de",
-     "search_url": "https://www.ebay.de/sch/i.html?_nkw={q}"},
     {"key": "mindfactory", "name": "Mindfactory", "region": REGION_EU, "domain": "mindfactory.de",
      "search_url": "https://www.mindfactory.de/search_result.php?search_query={q}"},
     {"key": "caseking", "name": "Caseking", "region": REGION_EU, "domain": "caseking.de",

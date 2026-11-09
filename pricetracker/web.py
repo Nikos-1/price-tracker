@@ -1,6 +1,7 @@
 """Τοπικός web server (μόνο 127.0.0.1) που σερβίρει το περιβάλλον της εφαρμογής και το API."""
 from __future__ import annotations
 
+import shutil
 from datetime import datetime
 from pathlib import Path
 
@@ -10,7 +11,9 @@ import json
 import re
 
 from . import analysis, notifier, receipts, warranty
-from .export import export_xlsx
+from . import __version__
+from .db import DEFAULT_SETTINGS
+from .export import export_settings_xlsx, export_xlsx
 from .shops import REGION_LABELS
 
 STATIC = Path(__file__).parent / "static"
@@ -38,6 +41,49 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None):
 
     def err(msg, code=400):
         return jsonify({"error": msg}), code
+
+    def remove_files(rel_paths):
+        """Σβήνει αρχεία (σχετικές διαδρομές) μέσα στον φάκελο δεδομένων και τους άδειους φακέλους τους."""
+        root = data_dir.resolve()
+        dirs = set()
+        for rel in rel_paths:
+            if not rel:
+                continue
+            p = (data_dir / rel).resolve()
+            if root not in p.parents:
+                continue
+            try:
+                p.unlink()
+            except OSError:
+                pass
+            dirs.add(p.parent)
+        for d in dirs:
+            try:
+                if d != root and not any(d.iterdir()):
+                    d.rmdir()
+            except OSError:
+                pass
+
+    def purge_product(pid: int):
+        """Διαγραφή προϊόντος με ό,τι το αφορά: τιμές, ιστορικό, screenshots και (αν δεν είναι κοινή) απόδειξη."""
+        p = db.get_product(pid)
+        if not p:
+            return
+        shots = db.product_screenshots(pid)
+        receipt = db.get_receipt(p["receipt_id"]) if p.get("receipt_id") else None
+        db.delete_product(pid)  # listings και price_history σβήνονται μαζί (ON DELETE CASCADE)
+        remove_files(shots)
+        shots_root = data_dir / "screenshots"
+        if shots_root.is_dir():
+            for d in shots_root.glob(f"{pid}_*"):
+                if d.is_dir():
+                    shutil.rmtree(d, ignore_errors=True)
+        if receipt and not db.receipt_products(receipt["id"]):
+            db.delete_receipt(receipt["id"])
+            remove_files([receipt["file"]])
+        notified = db.get_settings().get("warranty_notified")
+        if isinstance(notified, list) and any(str(k).split(":")[0] == str(pid) for k in notified):
+            db.set_settings({"warranty_notified": [k for k in notified if str(k).split(":")[0] != str(pid)]})
 
     @app.errorhandler(ValueError)
     def _value_error(e):
@@ -123,8 +169,13 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None):
 
     @app.delete("/api/categories/<int:cid>")
     def delete_category(cid):
-        db.delete_category(cid, delete_products=request.args.get("products") == "1")
+        for pid in db.delete_category(cid):
+            purge_product(pid)
         return jsonify({"ok": True})
+
+    @app.get("/api/categories/<int:cid>/usage")
+    def category_usage(cid):
+        return jsonify(db.category_usage(cid))
 
     # ------------------------------------------------------------ products
     @app.get("/api/products")
@@ -206,7 +257,7 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None):
 
     @app.delete("/api/products/<int:pid>")
     def delete_product(pid):
-        db.delete_product(pid)
+        purge_product(pid)
         return jsonify({"ok": True})
 
     @app.post("/api/products/<int:pid>/search")
@@ -237,7 +288,9 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None):
 
     @app.delete("/api/listings/<int:lid>")
     def delete_listing(lid):
+        shots = db.listing_screenshots([lid])
         db.delete_listing(lid)
+        remove_files(shots)
         return jsonify({"ok": True})
 
     # ------------------------------------------------------------ shops
@@ -281,7 +334,9 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None):
 
     @app.delete("/api/shops/<int:sid>")
     def delete_shop(sid):
+        shots = db.listing_screenshots(db.shop_listing_ids(sid))
         db.delete_shop(sid, delete_listings=request.args.get("listings") == "1")
+        remove_files(shots)
         return jsonify({"ok": True})
 
     # ------------------------------------------------------------ settings
@@ -296,25 +351,111 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None):
     def put_settings():
         b = request.get_json() or {}
         pw = b.pop("smtp_password", None)
-        b.pop("has_password", None)
-        b.pop("smtp_password_plain", None)
+        b = clean_settings(b)
+        db.set_settings(b)
+        if pw:
+            notifier.save_password(db, b.get("smtp_user") or db.get_settings().get("smtp_user", ""), pw)
+        msg = apply_autostart(b)
+        return err(msg) if msg else jsonify({"ok": True})
+
+    def clean_settings(b: dict) -> dict:
+        b = {k: v for k, v in b.items() if k in DEFAULT_SETTINGS}  # μόνο ρυθμίσεις του χρήστη
         for k in ("check_interval_hours", "bf_interval_hours"):
             if k in b:
                 v = float(b[k])
                 if not 0.25 <= v <= 168:
-                    return err("Το διάστημα ελέγχου πρέπει να είναι από 0,25 έως 168 ώρες")
+                    raise ValueError("Το διάστημα ελέγχου πρέπει να είναι από 0,25 έως 168 ώρες")
                 b[k] = v
-        if "smtp_port" in b:
-            b["smtp_port"] = int(b["smtp_port"])
-        db.set_settings(b)
-        if pw:
-            notifier.save_password(db, b.get("smtp_user") or db.get_settings().get("smtp_user", ""), pw)
+        for k in ("smtp_port", "warranty_reminder_days"):
+            if k in b:
+                b[k] = int(b[k] or 0)
+        return b
+
+    def apply_autostart(b: dict):
         if "start_with_windows" in b and shell is not None:
             try:
                 shell.set_autostart(bool(b["start_with_windows"]))
             except Exception as e:  # noqa: BLE001
-                return err(f"Δεν ρυθμίστηκε η αυτόματη εκκίνηση: {e}")
-        return jsonify({"ok": True})
+                return f"Δεν ρυθμίστηκε η αυτόματη εκκίνηση: {e}"
+        return None
+
+    def settings_payload() -> dict:
+        s = db.get_settings()
+        return {
+            "app": "PriceTracker", "kind": "settings", "version": __version__,
+            "exported_at": datetime.now().replace(microsecond=0).isoformat(),
+            "settings": {k: s.get(k, v) for k, v in DEFAULT_SETTINGS.items()},
+            "shops": [{"name": x["name"], "domain": x["domain"], "region": x["region"],
+                       "search_url": x.get("search_url") or "", "search_enabled": bool(x.get("search_enabled"))}
+                      for x in db.list_shops()],
+        }
+
+    def save_export(kind: str) -> Path:
+        stamp = f"{datetime.now():%Y-%m-%d_%H%M%S}"
+        out_dir = data_dir / "exports"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        if kind == "xlsx":
+            shops = [{**x, "used": db.shop_usage(x["id"])} for x in db.list_shops()]
+            return export_settings_xlsx(db.get_settings(), shops, out_dir / f"Ρυθμίσεις και καταστήματα {stamp}.xlsx")
+        out = out_dir / f"PriceTracker ρυθμίσεις {stamp}.json"
+        out.write_text(json.dumps(settings_payload(), ensure_ascii=False, indent=2), encoding="utf-8")
+        return out
+
+    @app.get("/api/settings/export")
+    def settings_export_download():
+        kind = "xlsx" if request.args.get("format") == "xlsx" else "json"
+        out = save_export(kind)
+        return send_file(out, as_attachment=True, download_name=out.name)
+
+    @app.post("/api/settings/export")
+    def settings_export_save():
+        """Αποθηκεύει στον φάκελο exports. Το xlsx ανοίγει· για το αρχείο ρυθμίσεων ανοίγει ο φάκελος."""
+        kind = "xlsx" if (request.get_json(silent=True) or {}).get("format") == "xlsx" else "json"
+        out = save_export(kind)
+        opened = False
+        if shell is not None:
+            try:
+                shell.open_path(out if kind == "xlsx" else out.parent)
+                opened = True
+            except Exception:  # noqa: BLE001
+                pass
+        return jsonify({"ok": True, "path": str(out), "name": out.name, "opened": opened})
+
+    @app.post("/api/settings/import")
+    def settings_import():
+        f = request.files.get("file")
+        if not f:
+            return err("Δεν επιλέχθηκε αρχείο")
+        try:
+            data = json.loads(f.read().decode("utf-8-sig"))
+        except (UnicodeDecodeError, ValueError):
+            return err("Το αρχείο δεν είναι αρχείο ρυθμίσεων του Price Tracker")
+        if not isinstance(data, dict) or data.get("app") != "PriceTracker" or data.get("kind") != "settings":
+            return err("Το αρχείο δεν είναι αρχείο ρυθμίσεων του Price Tracker")
+        settings = clean_settings(data.get("settings") or {})
+        db.set_settings(settings)
+        from .shops import host_of
+
+        added = updated = 0
+        for x in data.get("shops") or []:
+            if not isinstance(x, dict):
+                continue
+            domain = host_of("https://" + str(x.get("domain") or "").strip())
+            name = str(x.get("name") or "").strip()
+            region = x.get("region") if x.get("region") in REGION_LABELS else "OTHER"
+            url = str(x.get("search_url") or "").strip()
+            if not domain or "." not in domain or not name or (url and "{q}" not in url):
+                continue
+            enabled = 1 if (x.get("search_enabled") and url) else 0
+            have = db.shop_by_domain(domain)
+            if have:
+                db.update_shop(have["id"], name=name, region=region, search_url=url, search_enabled=enabled)
+                updated += 1
+            else:
+                db.create_shop(name, region, domain, url, enabled)
+                added += 1
+        apply_autostart(settings)
+        return jsonify({"ok": True, "settings": len(settings), "shops_added": added, "shops_updated": updated})
 
     @app.post("/api/settings/test-email")
     def test_email():
