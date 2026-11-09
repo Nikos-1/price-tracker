@@ -196,10 +196,21 @@ class Database:
                 (s["key"], s["name"], s["region"], s["domain"], s["search_url"], s["country"]),
             )
         # Γενικές κατηγορίες καταστημάτων: οι προεπιλεγμένες μπαίνουν μία φορά, μετά τις διαχειρίζεται ο χρήστης
-        if not c.execute("SELECT 1 FROM settings WHERE key='sectors_seeded'").fetchone():
-            for name in shops_mod.DEFAULT_SECTORS:
+        # (και όσες προστίθενται σε νεότερη έκδοση). Μια προεπιλεγμένη που έσβησε ο χρήστης δεν ξαναμπαίνει.
+        row = c.execute("SELECT value FROM settings WHERE key='sectors_seeded'").fetchone()
+        offered = set()
+        if row:
+            try:
+                v = json.loads(row["value"])
+            except (TypeError, ValueError):
+                v = None
+            offered = set(v) if isinstance(v, list) else set(shops_mod.DEFAULT_SECTORS_V06)
+        new = [n for n in shops_mod.DEFAULT_SECTORS if n not in offered]
+        if new or not row:
+            for name in new:
                 c.execute("INSERT OR IGNORE INTO sectors(name) VALUES(?)", (name,))
-            c.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('sectors_seeded','true')")
+            c.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('sectors_seeded',?)",
+                      (json.dumps(sorted(offered | set(new)), ensure_ascii=False),))
         row = c.execute("SELECT value FROM settings WHERE key='shop_sectors_done'").fetchone()
         done = set(json.loads(row["value"])) if row and row["value"] else set()
         sector_ids = {r["name"]: r["id"] for r in c.execute("SELECT id, name FROM sectors")}
@@ -209,11 +220,21 @@ class Database:
             r = c.execute("SELECT id FROM shops WHERE key=?", (key,)).fetchone()
             if not r:
                 continue
-            for n in names:
+            for n in names + (shops_mod.ELEC_EXTRA if shops_mod.ELEC in names else []):
                 if n in sector_ids:
                     c.execute("INSERT OR IGNORE INTO shop_sectors(shop_id, sector_id) VALUES(?,?)", (r["id"], sector_ids[n]))
             done.add(key)
         c.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('shop_sectors_done',?)", (json.dumps(sorted(done)),))
+        # v0.7: όσα καταστήματα είναι στα «Ηλεκτρονικά» παίρνουν μία φορά και τις νέες σχετικές κατηγορίες
+        if not c.execute("SELECT 1 FROM settings WHERE key='sectors_elec_extra'").fetchone():
+            if shops_mod.ELEC in sector_ids:
+                for r in c.execute("SELECT shop_id FROM shop_sectors WHERE sector_id=?",
+                                   (sector_ids[shops_mod.ELEC],)).fetchall():
+                    for n in shops_mod.ELEC_EXTRA:
+                        if n in sector_ids:
+                            c.execute("INSERT OR IGNORE INTO shop_sectors(shop_id, sector_id) VALUES(?,?)",
+                                      (r["shop_id"], sector_ids[n]))
+            c.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('sectors_elec_extra','true')")
         # Χώρα για καταστήματα παλιότερων εκδόσεων (μόνο όπου λείπει, τίποτα άλλο δεν αλλάζει)
         defaults = {s["key"]: s["country"] for s in shops_mod.DEFAULT_SHOPS}
         for r in c.execute("SELECT id, key, domain FROM shops WHERE country IS NULL").fetchall():
