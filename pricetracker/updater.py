@@ -21,7 +21,10 @@ from . import __version__
 log = logging.getLogger(__name__)
 
 REPO = "Nikos-1/price-tracker"
-API_URL = os.environ.get("PRICETRACKER_UPDATE_URL", f"https://api.github.com/repos/{REPO}/releases/latest")
+DEFAULT_API_URL = f"https://api.github.com/repos/{REPO}/releases/latest"
+# Άλλη πηγή ενημερώσεων μόνο για δοκιμές από τον κώδικα, ποτέ στο εγκατεστημένο PriceTracker.exe
+API_URL = (DEFAULT_API_URL if getattr(sys, "frozen", False)
+           else os.environ.get("PRICETRACKER_UPDATE_URL", DEFAULT_API_URL))
 ASSET_NAME = "PriceTracker-windows.zip"
 CHECK_EVERY_HOURS = 12
 
@@ -155,18 +158,19 @@ class Updater:
             self.notify(f"Υπάρχει νέα έκδοση {self._release['version']}. Εγκατάσταση από τις Ρυθμίσεις.")
 
     def _fetch(self, url: str, sha_url: str | None, dest: Path) -> Path:
+        if not sha_url:  # χωρίς έλεγχο ακεραιότητας δεν εγκαθίσταται τίποτα
+            raise RuntimeError("Η νέα έκδοση δεν έχει αρχείο ελέγχου (.sha256), δεν εγκαθίσταται")
         self.dir.mkdir(parents=True, exist_ok=True)
         req = urllib.request.Request(url, headers={"User-Agent": f"PriceTracker/{__version__}"})
         with urllib.request.urlopen(req, timeout=300) as r, open(dest, "wb") as f:
             shutil.copyfileobj(r, f)
-        if sha_url:
-            req = urllib.request.Request(sha_url, headers={"User-Agent": f"PriceTracker/{__version__}"})
-            with urllib.request.urlopen(req, timeout=30) as r:
-                expected = r.read().decode().split()[0].strip().lower()
-            actual = hashlib.sha256(dest.read_bytes()).hexdigest()
-            if actual != expected:
-                dest.unlink(missing_ok=True)
-                raise RuntimeError("Το αρχείο της ενημέρωσης δεν πέρασε τον έλεγχο ακεραιότητας")
+        req = urllib.request.Request(sha_url, headers={"User-Agent": f"PriceTracker/{__version__}"})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            expected = r.read().decode().split()[0].strip().lower()
+        actual = hashlib.sha256(dest.read_bytes()).hexdigest()
+        if actual != expected:
+            dest.unlink(missing_ok=True)
+            raise RuntimeError("Το αρχείο της ενημέρωσης δεν πέρασε τον έλεγχο ακεραιότητας")
         return dest
 
     def download_setup(self, rel: dict) -> Path:

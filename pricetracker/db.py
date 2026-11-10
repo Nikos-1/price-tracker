@@ -371,6 +371,21 @@ class Database:
                 (product_id, product_id)).fetchall()
         return {r[0] for r in rows}
 
+    def other_screenshot_dirs(self, product_id: int) -> set[str]:
+        """Οι φάκελοι (σχετικές διαδρομές) με screenshots ΑΛΛΩΝ προϊόντων, για να μη σβηστούν ποτέ κατά λάθος."""
+        with self.conn() as c:
+            rows = c.execute(
+                """SELECT h.screenshot FROM price_history h JOIN listings l ON l.id = h.listing_id
+                   WHERE l.product_id<>? AND h.screenshot IS NOT NULL
+                   UNION SELECT last_screenshot FROM listings WHERE product_id<>? AND last_screenshot IS NOT NULL""",
+                (product_id, product_id)).fetchall()
+        out = set()
+        for (rel,) in rows:
+            posix = (rel or "").replace("\\", "/")
+            if "/" in posix:
+                out.add(posix.rsplit("/", 1)[0])
+        return out
+
     def move_screenshots(self, product_id: int, old_dir: str, new_dir: str):
         """Οι διαδρομές των screenshots ενός προϊόντος μετά από μετονομασία/μεταφορά του φακέλου του."""
         old = old_dir.rstrip("/") + "/"

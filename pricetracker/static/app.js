@@ -11,7 +11,9 @@ const money = (v, cur, v_eur) => (v == null ? "–" : !cur || cur === "EUR" || v
 const fmtDate = (s) => (s ? new Date(s.replace(" ", "T")).toLocaleString("el-GR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" }) : "–");
 
 async function api(method, url, body) {
-  const r = await fetch(url, { method, headers: body ? { "Content-Type": "application/json" } : {}, body: body ? JSON.stringify(body) : undefined });
+  const headers = { "X-PriceTracker": "1" };  // ο τοπικός server δέχεται αλλαγές μόνο από αυτό το παράθυρο
+  if (body) headers["Content-Type"] = "application/json";
+  const r = await fetch(url, { method, headers, body: body ? JSON.stringify(body) : undefined });
   const data = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(data.error || "Σφάλμα " + r.status);
   return data;
@@ -332,7 +334,7 @@ async function markPurchased(p) {
 }
 
 async function apiForm(url, fd) {
-  const r = await fetch(url, { method: "POST", body: fd });
+  const r = await fetch(url, { method: "POST", headers: { "X-PriceTracker": "1" }, body: fd });
   const data = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(data.error || (r.status === 413 ? "Το αρχείο είναι πολύ μεγάλο (έως 30 MB)" : "Σφάλμα " + r.status));
   return data;

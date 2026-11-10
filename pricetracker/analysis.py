@@ -16,18 +16,61 @@ def cyber_monday(year: int) -> date:
     return black_friday(year) + timedelta(days=3)
 
 
+DEFAULT_BF = ((11, 20), (12, 2))
+
+
+def parse_month_day(value) -> tuple[int, int] | None:
+    """«11-20» (ΜΜ-ΗΗ), «2026-11-20», ή όπως το γράφουμε στα ελληνικά «20/11», «20.11» (ΗΗ/ΜΜ).
+    Επιστρέφει (μήνας, ημέρα) ή None αν δεν είναι έγκυρη ημερομηνία."""
+    import re
+
+    v = str(value or "").strip()
+    m = re.fullmatch(r"(?:\d{4}-)?(\d{1,2})-(\d{1,2})", v)
+    if m:
+        mo, d = int(m[1]), int(m[2])
+    else:
+        m = re.fullmatch(r"(\d{1,2})[/.](\d{1,2})(?:[/.]\d{2,4})?", v)
+        if not m:
+            return None
+        d, mo = int(m[1]), int(m[2])
+    try:
+        date(2028, mo, d)  # δίσεκτο έτος: δεκτή και η 29/2
+    except ValueError:
+        return None
+    return mo, d
+
+
+def _day(year: int, md: tuple[int, int]) -> date:
+    mo, d = md
+    try:
+        return date(year, mo, d)
+    except ValueError:  # 29/2 σε μη δίσεκτο έτος
+        return date(year, mo, 28)
+
+
 def bf_window(settings: dict, year: int) -> tuple[date, date]:
-    if not settings.get("bf_window_auto", True) and settings.get("bf_start") and settings.get("bf_end"):
-        sm, sd = map(int, str(settings["bf_start"]).split("-"))
-        em, ed = map(int, str(settings["bf_end"]).split("-"))
-        return date(year, sm, sd), date(year, em, ed)
-    return date(year, 11, 20), date(year, 12, 2)
+    """Η περίοδος των συχνών ελέγχων. Αν η αρχή είναι μετά το τέλος (π.χ. 20/12 έως 5/1),
+    η περίοδος περνά στην επόμενη χρονιά. Μια άκυρη ρύθμιση δεν σταματά ποτέ τους ελέγχους:
+    χρησιμοποιείται η προεπιλογή."""
+    start_md, end_md = DEFAULT_BF
+    if not settings.get("bf_window_auto", True):
+        s, e = parse_month_day(settings.get("bf_start")), parse_month_day(settings.get("bf_end"))
+        if s and e:
+            start_md, end_md = s, e
+    start, end = _day(year, start_md), _day(year, end_md)
+    if end < start:
+        end = _day(year + 1, end_md)
+    return start, end
 
 
 def in_bf_window(settings: dict, when: datetime | None = None) -> bool:
     when = when or datetime.now()
-    start, end = bf_window(settings, when.year)
-    return start <= when.date() <= end
+    d = when.date()
+    for y in (d.year - 1, d.year):  # και περίοδος που ξεκίνησε πέρσι (π.χ. 20/12 έως 5/1)
+        start, end = bf_window(settings, y)
+        if start <= d <= end:
+            return True
+    return False
 
 
 def current_interval_hours(settings: dict, when: datetime | None = None) -> float:

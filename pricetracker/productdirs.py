@@ -45,7 +45,10 @@ def target_dir(data_dir: Path, product: dict, current: str | None = None) -> str
 
 def product_dir(db, data_dir: Path, product: dict) -> Path:
     """Πού μπαίνει το επόμενο screenshot του προϊόντος (φτιάχνει/μετονομάζει τον φάκελο αν χρειάζεται)."""
-    return Path(data_dir) / sync(db, data_dir, product["id"])
+    rel = sync(db, data_dir, product["id"])
+    if not rel:
+        raise RuntimeError("Το προϊόν διαγράφηκε")  # ποτέ screenshot χύμα στον φάκελο PriceTracker
+    return Path(data_dir) / rel
 
 
 def sync(db, data_dir: Path, product_id: int) -> str:
@@ -113,9 +116,13 @@ def all_dirs(db, data_dir: Path, product_id: int) -> list[Path]:
     if old.is_dir():
         out += [d for d in old.glob(f"{product_id}_*") if d.is_dir()]
     root = data_dir.resolve()
+    # Ποτέ φάκελος που έχει screenshots άλλου προϊόντος (π.χ. ίδιο όνομα και ημερομηνία).
+    others = {(data_dir / rel).resolve() for rel in db.other_screenshot_dirs(product_id)}
     seen, res = set(), []
     for d in out:
         r = d.resolve()
+        if r in others or any(o.is_relative_to(r) for o in others):
+            continue
         if r not in seen and root in r.parents and r.exists():
             seen.add(r)
             res.append(d)
