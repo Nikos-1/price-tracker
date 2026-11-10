@@ -124,13 +124,45 @@ def move_internal_files(data_dir: Path, app_dir: Path, exports_dir: Path | None 
             continue
         try:
             if not dst.exists():
-                shutil.move(str(src), str(dst))
+                os.replace(src, dst)  # ίδιος δίσκος: απλή μετονομασία, χωρίς αντιγραφή
                 moved.append(name)
-            elif name in DISPOSABLE:  # υπάρχει ήδη νεότερο στον νέο φάκελο· το παλιό δεν χρειάζεται
-                shutil.rmtree(src) if src.is_dir() else src.unlink()
-        except OSError as e:
-            print(f"Δεν μεταφέρθηκε το {src}: {e}", file=sys.stderr)
+                continue
+        except OSError:
+            pass
+        # Δεν μετακινήθηκε (π.χ. το κλειδώνει το OneDrive) ή υπάρχει ήδη στον νέο φάκελο. Είναι προσωρινά αρχεία
+        # (cache του browser, logs, ενημερώσεις), οπότε απλώς σβήνονται· ό,τι μείνει σβήνεται στην επόμενη εκκίνηση.
+        remove_tree(src)
+        if not src.exists():
+            moved.append(name)
     return moved
+
+
+def remove_tree(path: Path):
+    """Σβήσιμο φακέλου ή αρχείου που αντέχει σε αρχεία μόνο-για-ανάγνωση και κλειδωμένα αρχεία."""
+    import shutil
+    import stat
+
+    def onexc(func, p, exc):
+        try:
+            os.chmod(p, stat.S_IWRITE)
+            func(p)
+        except OSError:
+            pass
+
+    try:
+        if path.is_dir() and not path.is_symlink():
+            if sys.version_info >= (3, 12):
+                shutil.rmtree(path, onexc=onexc)
+            else:
+                shutil.rmtree(path, onerror=lambda f, p, e: onexc(f, p, e[1]))
+        elif path.exists():
+            try:
+                path.unlink()
+            except PermissionError:
+                os.chmod(path, stat.S_IWRITE)
+                path.unlink()
+    except OSError:
+        pass
 
 
 def setup_logging(data_dir: Path):
@@ -292,6 +324,9 @@ def main(argv=None):
     exports_dir = data_dir / "exports" if args.data else default_exports_dir(data_dir)
     moved = move_internal_files(data_dir, app_dir, exports_dir)
     setup_logging(app_dir)
+    for name in INTERNAL_NAMES:
+        if (data_dir / name).exists() and data_dir != app_dir:
+            log.warning("Έμεινε στα Έγγραφα (θα σβηστεί στην επόμενη εκκίνηση): %s", data_dir / name)
     if moved:
         log.info("Μεταφέρθηκαν (Έγγραφα / %s / %s): %s", app_dir, exports_dir, ", ".join(moved))
     db = Database(data_dir / "pricetracker.db")
