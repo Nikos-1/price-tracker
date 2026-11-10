@@ -208,7 +208,14 @@ class Browser:
         """Ανοίγει τη σελίδα και επιστρέφει (page, PageResult). Ο καλών κλείνει τη σελίδα."""
         self._polite_wait(url)
         page = self._context.new_page()
-        resp = page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+        try:
+            resp = page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+        except Exception:
+            try:  # να μη μένουν ανοιχτές καρτέλες από σελίδες που δεν άνοιξαν
+                page.close()
+            except Exception:  # noqa: BLE001
+                pass
+            raise
         try:
             page.wait_for_load_state("networkidle", timeout=8000)
         except Exception:  # noqa: BLE001

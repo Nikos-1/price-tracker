@@ -5,7 +5,7 @@ import json
 import sqlite3
 import threading
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from . import shops as shops_mod
@@ -68,6 +68,13 @@ CREATE TABLE IF NOT EXISTS price_history (
     error TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_history_listing ON price_history(listing_id, checked_at);
+CREATE TABLE IF NOT EXISTS alerts_sent (
+    listing_id INTEGER NOT NULL REFERENCES listings(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,
+    sent_at TEXT NOT NULL,
+    price_eur REAL
+);
+CREATE INDEX IF NOT EXISTS ix_alerts_sent ON alerts_sent(listing_id, kind, sent_at);
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT
@@ -632,6 +639,34 @@ class Database:
                      price_eur, listing_id),
                 )
         return ts
+
+    # ---------- ειδοποιήσεις που στάλθηκαν (για να μη στέλνεται η ίδια ξανά και ξανά) ----------
+    def last_alert(self, listing_id: int, kind: str):
+        with self.conn() as c:
+            r = c.execute("SELECT sent_at, price_eur FROM alerts_sent WHERE listing_id=? AND kind=?"
+                          " ORDER BY sent_at DESC LIMIT 1", (listing_id, kind)).fetchone()
+        return dict(r) if r else None
+
+    def record_alert(self, listing_id: int, kind: str, price_eur=None):
+        with self.conn() as c:
+            if c.execute("SELECT 1 FROM listings WHERE id=?", (listing_id,)).fetchone():
+                c.execute("INSERT INTO alerts_sent(listing_id, kind, sent_at, price_eur) VALUES(?,?,?,?)",
+                          (listing_id, kind, now_iso(), price_eur))
+            c.execute("DELETE FROM alerts_sent WHERE sent_at < ?",
+                      ((datetime.now() - timedelta(days=90)).isoformat(sep=" "),))
+
+    def stale_products(self, hours: float = 24) -> list[str]:
+        """Προϊόντα που παρακολουθούνται αλλά δεν έχουν ελεγχθεί επιτυχώς πάνω από τόσες ώρες."""
+        cutoff = (datetime.now() - timedelta(hours=hours)).replace(microsecond=0).isoformat(sep=" ")
+        with self.conn() as c:
+            rows = c.execute(
+                """SELECT p.name FROM products p WHERE p.purchased=0
+                   AND EXISTS (SELECT 1 FROM listings l WHERE l.product_id=p.id AND l.status='active'
+                               AND l.created_at < ?)
+                   AND NOT EXISTS (SELECT 1 FROM listings l JOIN price_history h ON h.listing_id=l.id
+                                   WHERE l.product_id=p.id AND h.error IS NULL AND h.checked_at >= ?)""",
+                (cutoff, cutoff)).fetchall()
+        return [r[0] for r in rows]
 
     def history(self, listing_id=None, product_id=None, since=None):
         q = """SELECT h.*, l.product_id, l.url, s.name AS shop_name, s.region AS region

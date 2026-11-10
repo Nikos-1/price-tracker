@@ -939,6 +939,7 @@ async function exportXlsx(productId) {
 }
 
 let lastRunning = false;
+let statusFails = 0;
 async function pollStatus() {
   try {
     const s = await api("GET", "/api/status");
@@ -952,13 +953,23 @@ async function pollStatus() {
     if (["downloading", "waiting", "installing"].includes(u.state)) parts.unshift(`<span class="run">⬆ ${esc(u.message)}</span>`);
     else if (u.available && !u.supported) parts.push(`<span class="run">Νέα έκδοση ${esc(u.latest)}</span>`);
     $("#status").innerHTML = parts.join(" · ");
+    // «Υγεία»: ό,τι δεν δουλεύει φαίνεται αμέσως, όχι μετά τη Black Friday
+    const hb = $("#health");
+    const issues = s.health || [];
+    hb.innerHTML = issues.map((t) => `<div>⚠ ${esc(t)}</div>`).join("");
+    hb.classList.toggle("hidden", !issues.length);
+    statusFails = 0;
     const bf = new Date(s.black_friday + "T00:00:00"), cm = new Date(s.cyber_monday + "T00:00:00");
     const days = Math.ceil((bf - new Date()) / 86400000);
     $("#bf-box").innerHTML = `<b>Black Friday:</b> ${bf.toLocaleDateString("el-GR")}<br><b>Cyber Monday:</b> ${cm.toLocaleDateString("el-GR")}<br>` +
       (days > 0 ? `σε ${days} μέρες` : days > -4 ? "<b>Τώρα!</b>" : "") + (s.bf_mode ? "<br>Έλεγχοι κάθε " + s.interval_hours + " ώρα" : "");
     if (lastRunning && !s.running && state.view !== "settings") refresh();  // όχι στις Ρυθμίσεις: θα χάνονταν οι αλλαγές
     lastRunning = s.running;
-  } catch (_) { /* ο server ξεκινά */ }
+  } catch (e) {
+    // Μερικές αποτυχίες είναι φυσιολογικές όσο ξεκινά ο server· μετά από λίγες, το λέμε αντί να «παγώνει» η μπάρα
+    statusFails += 1;
+    if (statusFails >= 3) $("#status").innerHTML = `<span class="warn">⚠ Δεν απαντά η εφαρμογή: ${esc(e.message)}</span>`;
+  }
   setTimeout(pollStatus, lastRunning ? 2000 : 5000);
 }
 

@@ -9,12 +9,14 @@ from flask import Flask, abort, jsonify, request, send_file, send_from_directory
 
 import json
 import re
+import time
 from urllib.parse import urlsplit
 
 from . import analysis, fx, notifier, productdirs, receipts, warranty
 from . import __version__
 from .db import DEFAULT_SETTINGS
 from .export import export_settings_xlsx, export_xlsx
+from .extract import normalize_currency
 from .shops import COUNTRIES, CURRENCY_CHOICES, REGION_LABELS, country_label, guess_country, region_of_country
 
 STATIC = Path(__file__).parent / "static"
@@ -179,7 +181,9 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None, exports_dir
         prices = [h["price_eur"] for h in hist if h.get("price_eur")]
         last_checked = max((l["last_checked"] for l in listings if l.get("last_checked")), default=None)
         errors = sum(1 for l in listings if l.get("last_error"))
-        need_currency = sum(1 for l in listings if l.get("last_price") is not None and not l.get("last_currency"))
+        # Ζητείται νόμισμα όταν λείπει ή όταν δεν μετατρέπεται σε € (π.χ. άγνωστος κωδικός)
+        need_currency = sum(1 for l in listings if l.get("last_price") is not None
+                            and normalize_currency(l.get("last_currency")) is None)
         return {**p, "best": best, "listing_count": len(listings), "candidate_count": len(cand),
                 "need_currency": need_currency,
                 "min_ever": min(prices) if prices else None, "last_checked": last_checked,
@@ -204,7 +208,33 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None, exports_dir
 
         s["version"] = __version__
         s["update"] = updater.status() if updater is not None else {"supported": False}
+        s["health"] = health_issues(settings, s["update"])
         return jsonify(s)
+
+    def health_issues(settings, upd) -> list[str]:
+        """«Υγεία»: προβλήματα που αλλιώς θα περνούσαν απαρατήρητα, με απλά λόγια."""
+        h = getattr(worker, "health", None) or {}
+        out = []
+        ts = h.get("scheduler_ts")
+        if ts and time.time() - ts > 300:
+            out.append("Οι αυτόματοι έλεγχοι έχουν σταματήσει. Κλείσε και ξανάνοιξε την εφαρμογή.")
+        if settings.get("email_enabled") and h.get("email_error"):
+            out.append(f"Το email απέτυχε ({h.get('email_error_at')}): {h['email_error']}")
+        box = settings.get("email_outbox") or []
+        if settings.get("email_enabled") and box:
+            out.append(f"{len(box)} email περιμένουν να σταλούν (νέα προσπάθεια κάθε 15 λεπτά).")
+        if h.get("backup_error"):
+            out.append(f"Δεν έγινε το αντίγραφο της βάσης στα Έγγραφα: {h['backup_error']}")
+        if (upd or {}).get("state") == "error" and (upd or {}).get("message"):
+            out.append(f"Ενημέρωση: {upd['message']}")
+        try:
+            stale = db.stale_products(24)
+        except Exception:  # noqa: BLE001
+            stale = []
+        if stale:
+            names = ", ".join(stale[:3]) + (f" και {len(stale) - 3} ακόμα" if len(stale) > 3 else "")
+            out.append(f"Δεν ελέγχθηκαν με επιτυχία πάνω από 24 ώρες: {names}")
+        return out
 
     @app.post("/api/check")
     def check_now():
@@ -537,6 +567,12 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None, exports_dir
         b = request.get_json() or {}
         pw = b.pop("smtp_password", None)
         b = clean_settings(b)
+        before = db.get_settings()
+        old_user, new_user = before.get("smtp_user", ""), b.get("smtp_user", before.get("smtp_user", ""))
+        if not pw and new_user and old_user and new_user != old_user \
+                and str(b.get("smtp_host", before.get("smtp_host"))) == str(before.get("smtp_host")):
+            # Άλλαξε μόνο το όνομα χρήστη: ο κωδικός που υπάρχει πάει μαζί του, αλλιώς το email θα «έσπαγε» σιωπηλά
+            pw = notifier.load_password(db, old_user) or None
         db.set_settings(b)
         if pw:
             try:

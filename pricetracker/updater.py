@@ -32,14 +32,17 @@ SETUP_ASSET = "PriceTracker-Setup.exe"
 
 # Τρέχει αφού κλείσει η εφαρμογή: είτε το πρόγραμμα εγκατάστασης αθόρυβα, είτε αντιγραφή των αρχείων (zip).
 PS_SCRIPT = r"""
-param([int]$ProcId, [string]$Mode, [string]$Src, [string]$Dst, [string]$Exe, [string]$ExeArgs, [string]$Log)
+param([int]$ProcId, [string]$Mode, [string]$Src, [string]$Dst, [string]$Exe, [string]$Log, [string]$Scope,
+      [string]$FailFile, [string]$ExeArgs)
 $ErrorActionPreference = 'Continue'
 "$(Get-Date -Format s) Αναμονή για κλείσιμο της εφαρμογής ($ProcId), τρόπος: $Mode" | Out-File -Append -Encoding utf8 $Log
 try { Wait-Process -Id $ProcId -Timeout 90 -ErrorAction SilentlyContinue } catch {}
 Start-Sleep -Seconds 2
 if ($Mode -eq 'setup') {
-  $p = Start-Process -FilePath $Src -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/CURRENTUSER',"/DIR=`"$Dst`"" -Wait -PassThru
+  # /CURRENTUSER για εγκατάσταση στον χρήστη, /ALLUSERS για Program Files (ζητά άδεια διαχειριστή)
+  $p = Start-Process -FilePath $Src -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',$Scope,"/DIR=`"$Dst`"" -Wait -PassThru
   "$(Get-Date -Format s) setup exit $($p.ExitCode)" | Out-File -Append -Encoding utf8 $Log
+  if ($p.ExitCode -ne 0) { "$($p.ExitCode)" | Out-File -Encoding ascii $FailFile }
 } else {
   robocopy $Src $Dst /E /R:10 /W:2 /NFL /NDL /NJH /NJS /NP | Out-File -Append -Encoding utf8 $Log
   "$(Get-Date -Format s) robocopy exit $LASTEXITCODE" | Out-File -Append -Encoding utf8 $Log
@@ -59,6 +62,17 @@ def is_frozen() -> bool:
 
 def install_dir() -> Path:
     return Path(sys.executable).parent
+
+
+def install_dir_writable() -> bool:
+    """Μπορεί ο χρήστης να γράψει στον φάκελο της εφαρμογής; Όχι στο Program Files χωρίς δικαιώματα διαχειριστή."""
+    probe = install_dir() / ".pt-write-test"
+    try:
+        probe.write_bytes(b"")
+        probe.unlink()
+        return True
+    except OSError:
+        return False
 
 
 def installed_with_setup() -> bool:
@@ -152,10 +166,30 @@ class Updater:
         if not is_frozen():
             self.state["message"] += " (η αυτόματη εγκατάσταση γίνεται μόνο στο PriceTracker.exe)"
             return
+        failed = self._failed_version()
+        if failed and failed == self._release["version"]:
+            # Η σιωπηλή εγκατάσταση αυτής της έκδοσης απέτυχε ήδη: όχι ξανά και ξανά κάθε 12 ώρες
+            self.state.update(state="error", message=f"Η αυτόματη εγκατάσταση της έκδοσης {failed} απέτυχε. "
+                                                     "Πάτησε «Εγκατάσταση» για να ξαναδοκιμάσεις.")
+            return
         if self.db.get_settings().get("auto_update", True):
             self._install_now()
         else:
             self.notify(f"Υπάρχει νέα έκδοση {self._release['version']}. Εγκατάσταση από τις Ρυθμίσεις.")
+
+    def _fail_file(self) -> Path:
+        return self.dir / "update_failed.txt"
+
+    def _failed_version(self) -> str | None:
+        """Αν η τελευταία σιωπηλή εγκατάσταση απέτυχε, ποια έκδοση ήταν."""
+        f, pending = self._fail_file(), self.dir / "update_pending.txt"
+        if not f.exists():
+            if pending.exists() and pending.read_text(encoding="utf-8").strip() != __version__ \
+                    and time.time() - pending.stat().st_mtime > 600:
+                # ξεκίνησε η εγκατάσταση αλλά η εφαρμογή ξανάνοιξε με την παλιά έκδοση
+                return pending.read_text(encoding="utf-8").strip()
+            return None
+        return pending.read_text(encoding="utf-8").strip() if pending.exists() else "?"
 
     def _fetch(self, url: str, sha_url: str | None, dest: Path) -> Path:
         if not sha_url:  # χωρίς έλεγχο ακεραιότητας δεν εγκαθίσταται τίποτα
@@ -211,6 +245,8 @@ class Updater:
             time.sleep(10)
         self.state.update(state="installing", message=f"Εγκατάσταση έκδοσης {rel['version']}…")
         self.notify(f"Ενημέρωση σε έκδοση {rel['version']}. Η εφαρμογή θα ξανανοίξει σε λίγα δευτερόλεπτα.")
+        self._fail_file().unlink(missing_ok=True)
+        (self.dir / "update_pending.txt").write_text(rel["version"], encoding="utf-8")
         self.launch_installer(new_path, "setup" if use_setup else "copy")
         time.sleep(2)
         if self.request_quit:
@@ -224,7 +260,9 @@ class Updater:
         cmd = ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden",
                "-File", str(script), "-ProcId", str(os.getpid()), "-Mode", mode, "-Src", str(src),
                "-Dst", str(target), "-Exe", str(target / "PriceTracker.exe"),
-               "-Log", str(self.dir / "update.log")]
+               "-Log", str(self.dir / "update.log"),
+               "-Scope", "/CURRENTUSER" if install_dir_writable() else "/ALLUSERS",
+               "-FailFile", str(self._fail_file())]
         if args:  # τελευταίο, ώστε ένα κενό όρισμα να μη «φάει» το επόμενο
             cmd += ["-ExeArgs", args]
         flags = 0x08000000  # CREATE_NO_WINDOW: κανένα παράθυρο κονσόλας
