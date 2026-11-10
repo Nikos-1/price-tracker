@@ -140,11 +140,13 @@ def find_candidates(html: str, page_url: str, title: str, ean=None, mpn=None, br
 
 # ---------------------------------------------------------------- αυτόματη εύρεση URL αναζήτησης
 SEARCH_PARAM_NAMES = ("q", "query", "search", "s", "text", "k", "keyword", "keywords", "search_query",
-                      "searchterm", "term", "w", "kw", "sSearch", "search_text", "searchQuery", "_nkw", "qs")
+                      "searchterm", "term", "w", "kw", "sSearch", "search_text", "searchQuery", "_nkw", "qs",
+                      "searchfor")
 # Συνηθισμένα μοτίβα (WooCommerce, Magento, Shopify, PrestaShop, OpenCart κ.ά.), δοκιμάζονται με τη σειρά
 COMMON_SEARCH_PATHS = ("/search?q={q}", "/search?query={q}", "/search?text={q}", "/?s={q}&post_type=product",
                        "/catalogsearch/result/?q={q}", "/search?search={q}", "/index.php?route=product/search&search={q}",
-                       "/search?controller=search&s={q}", "/?s={q}", "/el/search?q={q}", "/search/?q={q}")
+                       "/search?controller=search&s={q}", "/?s={q}", "/el/search?q={q}", "/search/?q={q}",
+                       "/search.php?searchfor={q}", "/search.php?q={q}")  # search.php: καταστήματα της Komvos.gr
 
 
 def _template_from_target(target: str, page_url: str) -> str | None:
