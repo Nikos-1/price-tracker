@@ -10,7 +10,7 @@ from flask import Flask, abort, jsonify, request, send_file, send_from_directory
 import json
 import re
 
-from . import analysis, fx, notifier, receipts, warranty
+from . import analysis, fx, notifier, productdirs, receipts, warranty
 from . import __version__
 from .db import DEFAULT_SETTINGS
 from .export import export_settings_xlsx, export_xlsx
@@ -31,12 +31,17 @@ def _num(v):
     return parse_price(v)
 
 
-def create_app(db, worker, data_dir: Path, shell=None, updater=None):
+SETTINGS_FILE = "Ρυθμίσεις.json"
+
+
+def create_app(db, worker, data_dir: Path, shell=None, updater=None, exports_dir: Path | None = None):
     """shell: αντικείμενο με hide()/quit()/show() για το παράθυρο (desktop)."""
     app = Flask(__name__, static_folder=None)
     app.config["MAX_CONTENT_LENGTH"] = MAX_RECEIPT_BYTES + 1024 * 1024
     app.config["JSON_AS_ASCII"] = False
     data_dir = Path(data_dir)
+    exports_dir = Path(exports_dir) if exports_dir else data_dir / "exports"  # Excel και εξαγωγές
+    productdirs.sync_all(db, data_dir)  # screenshots\<id>_<όνομα> → Προϊόντα\<ημερομηνία προσθήκης> <όνομα>
     receipts.organize_all(db, data_dir)  # παλιές αποδείξεις → Αποδείξεις\<έτος>\<ημ/νία> <κατάστημα> - <προϊόντα>
 
     def err(msg, code=400):
@@ -67,14 +72,12 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None):
     def purge_search_data(pid: int):
         """Σβήνει μόνο τα δεδομένα αναζήτησης: καταστήματα του προϊόντος, τιμές, ιστορικό και screenshots."""
         shots = db.product_screenshots(pid)
+        folder = productdirs.current_dir(db, pid)
         for l in db.list_listings(product_id=pid, status=None):
             db.delete_listing(l["id"])  # το ιστορικό σβήνεται μαζί (ON DELETE CASCADE)
         remove_files(shots)
-        shots_root = data_dir / "screenshots"
-        if shots_root.is_dir():
-            for d in shots_root.glob(f"{pid}_*"):
-                if d.is_dir():
-                    shutil.rmtree(d, ignore_errors=True)
+        if folder:
+            shutil.rmtree(data_dir / folder, ignore_errors=True)
 
     def purge_product(pid: int):
         """Διαγραφή προϊόντος. Αν έχει αγοραστεί, μένει στα αγορασμένα με αγορά, εγγύηση και απόδειξη,
@@ -86,14 +89,12 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None):
             purge_search_data(pid)
             return
         shots = db.product_screenshots(pid)
+        folder = productdirs.current_dir(db, pid)
         receipt = db.get_receipt(p["receipt_id"]) if p.get("receipt_id") else None
         db.delete_product(pid)  # listings και price_history σβήνονται μαζί (ON DELETE CASCADE)
         remove_files(shots)
-        shots_root = data_dir / "screenshots"
-        if shots_root.is_dir():
-            for d in shots_root.glob(f"{pid}_*"):
-                if d.is_dir():
-                    shutil.rmtree(d, ignore_errors=True)
+        if folder:
+            shutil.rmtree(data_dir / folder, ignore_errors=True)
         if receipt and not db.receipt_products(receipt["id"]):
             db.delete_receipt(receipt["id"])
             remove_files([receipt["file"]])
@@ -315,8 +316,10 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None):
             fields["notes"] = b["notes"]
         db.update_product(pid, **fields)
         p = db.get_product(pid)
-        if "name" in fields and p and p.get("receipt_id"):
-            receipts.organize(db, data_dir, p["receipt_id"])
+        if "name" in fields and p:
+            productdirs.sync(db, data_dir, pid)  # ο φάκελος του προϊόντος παίρνει το νέο όνομα
+            if p.get("receipt_id"):
+                receipts.organize(db, data_dir, p["receipt_id"])
         return jsonify({"ok": True})
 
     @app.post("/api/products/<int:pid>/purchased")
@@ -548,7 +551,7 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None):
 
     def save_export(kind: str) -> Path:
         stamp = f"{datetime.now():%Y-%m-%d_%H%M%S}"
-        out_dir = data_dir / "exports"
+        out_dir = exports_dir
         out_dir.mkdir(parents=True, exist_ok=True)
         if kind == "xlsx":
             names = {x["id"]: x["name"] for x in db.list_sectors()}
@@ -807,7 +810,7 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None):
     def export():
         pid = request.args.get("product")
         name = f"price-tracker_{datetime.now():%Y%m%d_%H%M}.xlsx"
-        out = data_dir / "exports" / name
+        out = exports_dir / name
         export_xlsx(db, data_dir, out, [int(pid)] if pid else None)
         return send_file(out, as_attachment=True, download_name=name)
 
@@ -816,7 +819,7 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None):
         """Αποθηκεύει το xlsx στον φάκελο exports και το ανοίγει (στην εφαρμογή desktop)."""
         pid = (request.get_json(silent=True) or {}).get("product_id")
         name = f"price-tracker_{datetime.now():%Y%m%d_%H%M%S}.xlsx"
-        out = export_xlsx(db, data_dir, data_dir / "exports" / name, [int(pid)] if pid else None)
+        out = export_xlsx(db, data_dir, exports_dir / name, [int(pid)] if pid else None)
         opened = False
         if shell is not None:
             try:
@@ -852,4 +855,26 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None):
             shell.show()
         return jsonify({"ok": True})
 
+    # ------------------------------------------------------------ Ρυθμίσεις.json στα Έγγραφα
+    # Αντίγραφο των ρυθμίσεων και των καταστημάτων που ενημερώνεται μόνο του (χωρίς τον κωδικό email).
+    # Φορτώνεται με την «Εισαγωγή» σε άλλον υπολογιστή ή μετά από format.
+    def save_settings_file():
+        try:
+            out = data_dir / SETTINGS_FILE
+            tmp = out.with_suffix(".tmp")
+            tmp.write_text(json.dumps(settings_payload(), ensure_ascii=False, indent=2), encoding="utf-8")
+            tmp.replace(out)
+        except Exception:  # noqa: BLE001
+            app.logger.warning("Δεν γράφτηκε το %s", SETTINGS_FILE, exc_info=True)
+
+    @app.after_request
+    def _settings_changed(resp):
+        p = request.path
+        if (request.method in ("POST", "PUT", "DELETE") and resp.status_code < 400
+                and (p.startswith(("/api/settings", "/api/shops", "/api/sectors"))) and "/export" not in p
+                and "test-email" not in p):
+            save_settings_file()
+        return resp
+
+    save_settings_file()
     return app

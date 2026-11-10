@@ -191,7 +191,7 @@ SETTING_LABELS = {
     "warranty_reminder_days": "Υπενθύμιση πριν λήξει η εγγύηση (μέρες)",
 }
 VALUE_LABELS = {
-    "screenshot_mode": {"changes": "Όταν αλλάζει τιμή ή διαθεσιμότητα", "always": "Σε κάθε έλεγχο"},
+    "screenshot_mode": {"changes": "Την ημέρα προσθήκης και όταν πέφτει η τιμή", "always": "Σε κάθε έλεγχο"},
     "browser_mode": {"auto": "Κρυφό, ανοίγει μόνο όταν χρειάζεται ενέργεια", "hidden": "Πάντα κρυφό",
                      "visible": "Πάντα ορατό"},
     "close_action": {"ask": "Να ρωτάει", "tray": "Να μένει στο system tray", "exit": "Να κλείνει"},

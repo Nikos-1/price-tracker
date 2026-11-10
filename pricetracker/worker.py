@@ -9,7 +9,7 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from . import analysis, fx, notifier
+from . import analysis, fx, notifier, productdirs
 from .browser import Browser
 from .extract import extract
 from .search import (build_query, find_candidates, looks_like_search_results, search_url,
@@ -35,7 +35,6 @@ class Worker:
         self.db = db
         self.data_dir = Path(data_dir)  # Έγγραφα\PriceTracker: screenshots
         self.app_dir = Path(app_dir) if app_dir else self.data_dir  # εσωτερικά: προφίλ browser
-        self.shots_dir = self.data_dir / "screenshots"
         self.q: queue.Queue = queue.Queue()
         self.notify_callback = notify_callback  # π.χ. ειδοποίηση στο system tray
         self.status = {"running": False, "task": "", "progress": 0, "total": 0,
@@ -246,19 +245,23 @@ class Worker:
             info.currency = info.currency or l.get("currency_override") or currency_of_country(l.get("country"))
             if info.price is not None and not info.currency:
                 self._ask_currency(l, product)
-            changed = (prev is None or prev["price"] != info.price or bool(prev["in_stock"]) != bool(in_stock))
             shot = None
-            if info.price is not None and (changed or settings.get("screenshot_mode") == "always"
-                                           or analysis.in_bf_window(settings)):
+            # Screenshot: την πρώτη φορά (η μέρα που προστέθηκε) και μετά μόνο όταν πέφτει η τιμή.
+            # Όλα μένουν στον φάκελο του προϊόντος, Προϊόντα\<ημερομηνία προσθήκης> <όνομα>.
+            last = next((h for h in reversed(prev_ok) if h["price"] is not None), None)
+            dropped = (last is not None and info.price is not None
+                       and (last.get("currency") or "") == (info.currency or last.get("currency") or "")
+                       and info.price < last["price"])
+            if info.price is not None and (last is None or dropped or settings.get("screenshot_mode") == "always"):
                 when = datetime.now().strftime("%d/%m/%Y %H:%M")
-                path = (self.shots_dir / f"{product['id']}_{_slug(product['name'])}" /
+                path = (productdirs.product_dir(self.db, self.data_dir, product) /
                         f"{datetime.now():%Y%m%d_%H%M%S}_{_slug(l.get('shop_name') or 'shop', 20)}.jpg")
                 price_txt = (fx.fmt_with_eur(info.price, info.currency, fx.to_eur(info.price, info.currency, self._fx()))
                              + ("" if in_stock else " (μη διαθέσιμο)"))
                 shop_txt = f"{l.get('shop_name') or ''} · {host_of(res.final_url)}"
                 try:
                     br.screenshot(page, path, shop_txt, info.title or product["name"], price_txt, when)
-                    shot = str(path.relative_to(self.data_dir))
+                    shot = path.relative_to(self.data_dir).as_posix()
                 except Exception as e:  # noqa: BLE001
                     self._log(f"Screenshot απέτυχε: {e}")
         finally:
