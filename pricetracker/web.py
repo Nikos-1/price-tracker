@@ -9,6 +9,7 @@ from flask import Flask, abort, jsonify, request, send_file, send_from_directory
 
 import json
 import re
+from urllib.parse import urlsplit
 
 from . import analysis, fx, notifier, productdirs, receipts, warranty
 from . import __version__
@@ -32,6 +33,16 @@ def _num(v):
 
 
 SETTINGS_FILE = "Ρυθμίσεις.json"
+LOCAL_HOSTS = {"127.0.0.1", "localhost"}
+
+
+def _hostname(netloc: str) -> str:
+    netloc = (netloc or "").strip().lower()
+    if netloc.startswith("["):
+        return netloc[1:].split("]", 1)[0]
+    return netloc.rsplit(":", 1)[0] if netloc.count(":") == 1 else netloc
+SERVABLE_EXT = {".jpg", ".jpeg", ".png", ".webp"}
+SERVABLE_DIRS = {productdirs.PRODUCTS_DIR, productdirs.OLD_SHOTS_DIR}
 
 
 def create_app(db, worker, data_dir: Path, shell=None, updater=None, exports_dir: Path | None = None):
@@ -46,6 +57,23 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None, exports_dir
 
     def err(msg, code=400):
         return jsonify({"error": msg}), code
+
+    @app.before_request
+    def local_only():
+        """Ο server ακούει μόνο στον υπολογιστή (127.0.0.1), αλλά κι έτσι μια ιστοσελίδα στον browser θα
+        μπορούσε να του στείλει αιτήματα. Δεχόμαστε μόνο Host 127.0.0.1/localhost (όχι DNS rebinding) και
+        αλλαγές μόνο από το δικό μας παράθυρο: σωστό Origin και η κεφαλίδα X-PriceTracker, που μια ξένη
+        σελίδα δεν μπορεί να στείλει χωρίς άδεια CORS (που δεν δίνουμε ποτέ)."""
+        if _hostname(request.host) not in LOCAL_HOSTS:
+            return err("Μη επιτρεπτό αίτημα", 403)
+        if request.method in ("GET", "HEAD", "OPTIONS"):
+            return None
+        origin = request.headers.get("Origin")
+        if origin is not None and _hostname(urlsplit(origin).netloc) not in LOCAL_HOSTS:
+            return err("Μη επιτρεπτό αίτημα", 403)
+        if request.headers.get("Sec-Fetch-Site") == "cross-site" or request.headers.get("X-PriceTracker") != "1":
+            return err("Μη επιτρεπτό αίτημα", 403)
+        return None
 
     def remove_files(rel_paths):
         """Σβήνει αρχεία (σχετικές διαδρομές) μέσα στον φάκελο δεδομένων και τους άδειους φακέλους τους."""
@@ -116,7 +144,10 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None, exports_dir
     @app.get("/shots/<path:name>")
     def shots(name):
         p = (data_dir / name).resolve()
-        if data_dir.resolve() not in p.parents or not p.exists():
+        # Μόνο εικόνες screenshots και αρχεία αποδείξεων, ποτέ η βάση ή οι ρυθμίσεις
+        if (data_dir.resolve() not in p.parents or not p.is_file()
+                or p.suffix.lower() not in SERVABLE_EXT
+                or p.relative_to(data_dir.resolve()).parts[0] not in SERVABLE_DIRS):
             abort(404)
         return send_file(p)
 
@@ -497,6 +528,7 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None, exports_dir
     def get_settings():
         s = db.get_settings()
         s.pop("smtp_password_plain", None)
+        s.pop("smtp_password_host", None)
         s["has_password"] = notifier.has_password(db, s.get("smtp_user", ""))
         return jsonify(s)
 
@@ -507,7 +539,10 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None, exports_dir
         b = clean_settings(b)
         db.set_settings(b)
         if pw:
-            notifier.save_password(db, b.get("smtp_user") or db.get_settings().get("smtp_user", ""), pw)
+            try:
+                notifier.save_password(db, b.get("smtp_user") or db.get_settings().get("smtp_user", ""), pw)
+            except RuntimeError as e:
+                return err(str(e))
         msg = apply_autostart(b)
         return err(msg) if msg else jsonify({"ok": True})
 
@@ -522,6 +557,16 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None, exports_dir
         for k in ("smtp_port", "warranty_reminder_days"):
             if k in b:
                 b[k] = int(b[k] or 0)
+        for k, label in (("bf_start", "η αρχή"), ("bf_end", "το τέλος")):
+            if k in b:
+                if not str(b[k] or "").strip():
+                    b[k] = ""
+                    continue
+                md = analysis.parse_month_day(b[k])
+                if not md:
+                    raise ValueError(f"Δεν είναι σωστή ημερομηνία {label} της περιόδου Black Friday "
+                                     f"(«{b[k]}»). Γράψε π.χ. 11-20 ή 20/11.")
+                b[k] = f"{md[0]:02d}-{md[1]:02d}"
         return b
 
     def apply_autostart(b: dict):

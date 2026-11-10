@@ -191,6 +191,15 @@ class Shell:
                 pass
 
     def hide(self):
+        if self.window and self.tray is None:
+            # Χωρίς εικονίδιο στο tray το παράθυρο δεν κρύβεται ποτέ (θα γινόταν αόρατη η εφαρμογή):
+            # ελαχιστοποιείται στη γραμμή εργασιών.
+            log.warning("no tray icon, minimizing instead of hiding")
+            try:
+                self.window.minimize()
+            except Exception:  # noqa: BLE001
+                pass
+            return
         self.hidden = True
         if self.window:
             self.window.hide()
@@ -249,7 +258,7 @@ class Shell:
 def already_running() -> bool:
     try:
         req = urllib.request.Request(f"http://127.0.0.1:{PORT}/api/window/show", data=b"{}", method="POST",
-                                     headers={"Content-Type": "application/json"})
+                                     headers={"Content-Type": "application/json", "X-PriceTracker": "1"})
         urllib.request.urlopen(req, timeout=2)
         return True
     except Exception:  # noqa: BLE001
@@ -333,6 +342,9 @@ def main(argv=None):
 
     shell.on_quit = do_quit
     shell.tray = start_tray(shell, worker, do_quit)
+    if shell.tray is None and args.tray and not args.browser:
+        args.tray = False  # χωρίς εικονίδιο στο tray: το παράθυρο ανοίγει κανονικά, αλλιώς δεν θα φαινόταν πουθενά
+        shell.hidden = False
 
     webview = None
     if not args.browser:

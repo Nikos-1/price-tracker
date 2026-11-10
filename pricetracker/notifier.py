@@ -30,29 +30,48 @@ def _keyring():
         return None
 
 
+def _host(db) -> str:
+    return (db.get_settings().get("smtp_host") or "smtp.gmail.com").strip().lower()
+
+
 def save_password(db, user: str, password: str):
+    """Ο κωδικός μένει ΜΟΝΟ στο Windows Credential Manager, ποτέ σε απλό κείμενο στη βάση (που
+    συγχρονίζεται στο OneDrive). Δένεται με τον SMTP server: αν αλλάξει ο server, ο κωδικός δεν
+    στέλνεται εκεί μέχρι να τον ξαναγράψεις."""
     kr = _keyring()
-    if kr is not None:
-        try:
-            kr.set_password(KEYRING_SERVICE, user, password)
-            db.set_settings({"smtp_password_plain": ""})
-            return "keyring"
-        except Exception:  # noqa: BLE001
-            log.warning("keyring unavailable, storing password in local db")
-    db.set_settings({"smtp_password_plain": password})
-    return "db"
+    if kr is None:
+        raise RuntimeError("Δεν είναι διαθέσιμο το Windows Credential Manager, ο κωδικός δεν αποθηκεύτηκε")
+    try:
+        kr.set_password(KEYRING_SERVICE, user, password)
+    except Exception as e:  # noqa: BLE001
+        raise RuntimeError(f"Ο κωδικός δεν αποθηκεύτηκε στο Windows Credential Manager: {e}") from e
+    db.set_settings({"smtp_password_plain": "", "smtp_password_host": _host(db)})
+    return "keyring"
 
 
 def load_password(db, user: str) -> str:
+    settings = db.get_settings()
+    bound = settings.get("smtp_password_host")
+    host = _host(db)
+    if bound is None:  # από παλιότερη έκδοση: δένεται με τον server που υπάρχει τώρα
+        db.set_settings({"smtp_password_host": host})
+    elif bound != host:
+        log.warning("SMTP server changed since the password was saved; not sending the password")
+        return ""
     kr = _keyring()
+    plain = settings.get("smtp_password_plain") or ""
     if kr is not None:
         try:
             pw = kr.get_password(KEYRING_SERVICE, user)
             if pw:
                 return pw
+            if plain:  # παλιός κωδικός σε απλό κείμενο: μεταφορά στο Credential Manager
+                kr.set_password(KEYRING_SERVICE, user, plain)
+                db.set_settings({"smtp_password_plain": ""})
+                return plain
         except Exception:  # noqa: BLE001
             pass
-    return db.get_settings().get("smtp_password_plain") or ""
+    return plain
 
 
 def has_password(db, user: str) -> bool:

@@ -89,27 +89,34 @@ class Worker:
         last = time.time()
         last_warranty = 0.0
         while not self._stop.wait(30):
-            if time.time() - last_warranty > 6 * 3600:
-                last_warranty = time.time()
-                try:
-                    self.check_warranties()
-                except Exception:  # noqa: BLE001
-                    log.exception("warranty check failed")
-            settings = self.db.get_settings()
-            if settings.get("research_daily", True) and not self.status["running"]:
-                last_r = float(settings.get("last_research_ts") or 0)
-                if last_r == 0:  # πρώτη φορά: όχι αμέσως, άσε πρώτα τους ελέγχους τιμών
-                    self.db.set_settings({"last_research_ts": time.time() - 23 * 3600})
-                elif time.time() - last_r > 24 * 3600:
-                    self.db.set_settings({"last_research_ts": time.time()})
-                    self.enqueue("research_all")
-            hours = analysis.current_interval_hours(settings)
-            base = self.status.get("last_run_ts") or last
-            nxt = base + hours * 3600
-            self.status["next_run"] = datetime.fromtimestamp(nxt).strftime("%Y-%m-%d %H:%M")
-            if time.time() >= nxt and not self.status["running"]:
-                self.enqueue("check_all")
-                self.status["last_run_ts"] = time.time()
+            try:
+                last_warranty = self._scheduler_tick(last, last_warranty)
+            except Exception:  # noqa: BLE001 - ο προγραμματιστής δεν πρέπει να σταματά ποτέ
+                log.exception("scheduler tick failed")
+
+    def _scheduler_tick(self, last: float, last_warranty: float) -> float:
+        if time.time() - last_warranty > 6 * 3600:
+            last_warranty = time.time()
+            try:
+                self.check_warranties()
+            except Exception:  # noqa: BLE001
+                log.exception("warranty check failed")
+        settings = self.db.get_settings()
+        if settings.get("research_daily", True) and not self.status["running"]:
+            last_r = float(settings.get("last_research_ts") or 0)
+            if last_r == 0:  # πρώτη φορά: όχι αμέσως, άσε πρώτα τους ελέγχους τιμών
+                self.db.set_settings({"last_research_ts": time.time() - 23 * 3600})
+            elif time.time() - last_r > 24 * 3600:
+                self.db.set_settings({"last_research_ts": time.time()})
+                self.enqueue("research_all")
+        hours = analysis.current_interval_hours(settings)
+        base = self.status.get("last_run_ts") or last
+        nxt = base + hours * 3600
+        self.status["next_run"] = datetime.fromtimestamp(nxt).strftime("%Y-%m-%d %H:%M")
+        if time.time() >= nxt and not self.status["running"]:
+            self.enqueue("check_all")
+            self.status["last_run_ts"] = time.time()
+        return last_warranty
 
     def _loop(self):
         while not self._stop.is_set():
@@ -199,20 +206,34 @@ class Worker:
         except Exception:  # noqa: BLE001
             self.fx = self.db.get_settings().get("fx") or {}
         alerts = []
-        with self._browser() as br:
-            for i, l in enumerate(listings, 1):
-                if self._stop.is_set():
-                    break
-                self.status["progress"] = i
+        try:
+            with self._browser() as br:
+                for i, l in enumerate(listings, 1):
+                    if self._stop.is_set():
+                        break
+                    self.status["progress"] = i
+                    if not self.db.get_listing(l["id"]):
+                        continue  # διαγράφηκε ενώ έτρεχε ο έλεγχος
+                    try:
+                        a = self._check_one(br, l, products[l["product_id"]], settings)
+                        alerts += a
+                    except Exception as e:  # noqa: BLE001
+                        msg = (str(e).splitlines() or [type(e).__name__])[0][:300]
+                        if not self.db.get_listing(l["id"]):
+                            self._log(f"{l.get('shop_name')}: διαγράφηκε κατά τον έλεγχο")
+                            continue
+                        try:
+                            self.db.record_check(l["id"], None, None, None, error=msg)
+                        except Exception:  # noqa: BLE001
+                            log.exception("record error failed")
+                        self._log(f"✗ {l.get('shop_name')}: {msg}")
+        finally:
+            # Οι ειδοποιήσεις που μαζεύτηκαν φεύγουν ό,τι κι αν συμβεί στα υπόλοιπα
+            if alerts:
                 try:
-                    a = self._check_one(br, l, products[l["product_id"]], settings)
-                    alerts += a
-                except Exception as e:  # noqa: BLE001
-                    msg = str(e).splitlines()[0][:300]
-                    self.db.record_check(l["id"], None, None, None, error=msg)
-                    self._log(f"✗ {l.get('shop_name')}: {msg}")
-        if alerts:
-            self._send_alerts(alerts, settings)
+                    self._send_alerts(alerts, settings)
+                except Exception:  # noqa: BLE001
+                    log.exception("sending alerts failed")
 
     def _check_one(self, br: Browser, l: dict, product: dict, settings: dict) -> list[dict]:
         prev_hist = self.db.history(listing_id=l["id"])
@@ -273,8 +294,13 @@ class Worker:
             if interactive:
                 br.restart(headless=True)  # πίσω σε κρυφό browser για τα υπόλοιπα
         price_eur = fx.to_eur(info.price, info.currency, self._fx())
-        self.db.record_check(l["id"], info.price, info.currency, in_stock, title=info.title, screenshot=shot,
-                             price_eur=price_eur)
+        try:
+            self.db.record_check(l["id"], info.price, info.currency, in_stock, title=info.title, screenshot=shot,
+                                 price_eur=price_eur)
+        except Exception:
+            if shot:  # η σελίδα/το προϊόν διαγράφηκε στο μεταξύ: να μη μείνει ορφανό screenshot
+                productdirs.remove_tree(self.data_dir / shot)
+            raise
         # Συμπλήρωση στοιχείων προϊόντος αν λείπουν
         upd = {}
         for k_info, k_prod in (("ean", "ean"), ("mpn", "mpn"), ("brand", "brand"), ("image", "image_url")):
