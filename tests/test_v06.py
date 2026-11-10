@@ -237,3 +237,22 @@ def test_electronics_shops_get_new_related_sectors(tmp_path):
     assert {"Κινητά & τηλέφωνα", "Τηλεοράσεις & ήχος", "Ηλεκτρικές συσκευές"} <= got
     skroutz = next(s for s in db.list_shops() if s["key"] == "skroutz")
     assert not db.shop_sector_ids().get(skroutz["id"])
+
+
+def test_leftover_browser_cache_is_removed_even_if_read_only(tmp_path):
+    import os
+    import stat
+
+    from pricetracker.app import move_internal_files
+
+    docs, app = tmp_path / "docs", tmp_path / "app"
+    for base in (docs, app):
+        (base / "browser-profile" / "Default" / "Cache").mkdir(parents=True)
+    f = docs / "browser-profile" / "Default" / "Cache" / "data_1"
+    f.write_text("x")
+    os.chmod(f, stat.S_IREAD)
+    (docs / "webview").mkdir()
+    (docs / "webview" / "x").write_text("1")
+    moved = move_internal_files(docs, app)
+    assert not (docs / "browser-profile").exists() and "browser-profile" in moved
+    assert (app / "webview" / "x").exists() and not (docs / "webview").exists()
