@@ -97,7 +97,63 @@ def sync_all(db, data_dir: Path):
     _remove_if_empty(Path(data_dir) / OLD_SHOTS_DIR, Path(data_dir))
 
 
-def remove(db, data_dir: Path, product_id: int):
+def all_dirs(db, data_dir: Path, product_id: int) -> list[Path]:
+    """Όλοι οι φάκελοι που αφορούν ένα προϊόν: ο τωρινός, αυτός με το όνομα που θα έπρεπε να έχει
+    και οι παλιοί screenshots\\<id>_… (όσοι υπάρχουν)."""
+    data_dir = Path(data_dir)
+    out = []
     cur = current_dir(db, product_id)
     if cur:
-        shutil.rmtree(Path(data_dir) / cur, ignore_errors=True)
+        out.append(data_dir / cur)
+    p = db.get_product(product_id)
+    if p:
+        base = data_dir / PRODUCTS_DIR / folder_name(p)
+        out += [base, base.with_name(base.name + f" ({product_id})")]
+    old = data_dir / OLD_SHOTS_DIR
+    if old.is_dir():
+        out += [d for d in old.glob(f"{product_id}_*") if d.is_dir()]
+    root = data_dir.resolve()
+    seen, res = set(), []
+    for d in out:
+        r = d.resolve()
+        if r not in seen and root in r.parents and r.exists():
+            seen.add(r)
+            res.append(d)
+    return res
+
+
+def remove_tree(path: Path):
+    """Σβήσιμο φακέλου ή αρχείου που αντέχει σε αρχεία μόνο-για-ανάγνωση (π.χ. OneDrive)."""
+    import os
+    import stat
+    import sys
+
+    def onexc(func, p, exc):
+        try:
+            os.chmod(p, stat.S_IWRITE)
+            func(p)
+        except OSError:
+            pass
+
+    path = Path(path)
+    try:
+        if path.is_dir() and not path.is_symlink():
+            if sys.version_info >= (3, 12):
+                shutil.rmtree(path, onexc=onexc)
+            else:
+                shutil.rmtree(path, onerror=lambda f, p, e: onexc(f, p, e[1]))
+        elif path.exists():
+            try:
+                path.unlink()
+            except PermissionError:
+                os.chmod(path, stat.S_IWRITE)
+                path.unlink()
+    except OSError:
+        pass
+
+
+def remove(dirs: list[Path], data_dir: Path):
+    """Σβήνει τους φακέλους ενός προϊόντος (από all_dirs) και ό,τι άδειο μείνει πάνω τους."""
+    for d in dirs:
+        remove_tree(d)
+        _remove_if_empty(Path(d).parent, Path(data_dir))

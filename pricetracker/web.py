@@ -57,10 +57,7 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None, exports_dir
             p = (data_dir / rel).resolve()
             if root not in p.parents:
                 continue
-            try:
-                p.unlink()
-            except OSError:
-                pass
+            productdirs.remove_tree(p)  # και αρχεία μόνο-για-ανάγνωση (OneDrive)
             dirs.add(p.parent)
         for d in dirs:
             try:
@@ -72,12 +69,11 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None, exports_dir
     def purge_search_data(pid: int):
         """Σβήνει μόνο τα δεδομένα αναζήτησης: καταστήματα του προϊόντος, τιμές, ιστορικό και screenshots."""
         shots = db.product_screenshots(pid)
-        folder = productdirs.current_dir(db, pid)
+        folders = productdirs.all_dirs(db, data_dir, pid)
         for l in db.list_listings(product_id=pid, status=None):
             db.delete_listing(l["id"])  # το ιστορικό σβήνεται μαζί (ON DELETE CASCADE)
         remove_files(shots)
-        if folder:
-            shutil.rmtree(data_dir / folder, ignore_errors=True)
+        productdirs.remove(folders, data_dir)  # ο φάκελος του προϊόντος με ό,τι έχει μέσα
 
     def purge_product(pid: int):
         """Διαγραφή προϊόντος. Αν έχει αγοραστεί, μένει στα αγορασμένα με αγορά, εγγύηση και απόδειξη,
@@ -89,15 +85,17 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None, exports_dir
             purge_search_data(pid)
             return
         shots = db.product_screenshots(pid)
-        folder = productdirs.current_dir(db, pid)
+        folders = productdirs.all_dirs(db, data_dir, pid)
         receipt = db.get_receipt(p["receipt_id"]) if p.get("receipt_id") else None
         db.delete_product(pid)  # listings και price_history σβήνονται μαζί (ON DELETE CASCADE)
         remove_files(shots)
-        if folder:
-            shutil.rmtree(data_dir / folder, ignore_errors=True)
+        productdirs.remove(folders, data_dir)  # ο φάκελος του προϊόντος με ό,τι έχει μέσα
         if receipt and not db.receipt_products(receipt["id"]):
             db.delete_receipt(receipt["id"])
             remove_files([receipt["file"]])
+            receipts_root = data_dir / receipts.RECEIPTS_DIR
+            if receipts_root.is_dir() and not any(receipts_root.iterdir()):
+                receipts_root.rmdir()
         notified = db.get_settings().get("warranty_notified")
         if isinstance(notified, list) and any(str(k).split(":")[0] == str(pid) for k in notified):
             db.set_settings({"warranty_notified": [k for k in notified if str(k).split(":")[0] != str(pid)]})

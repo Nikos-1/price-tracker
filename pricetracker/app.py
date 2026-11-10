@@ -138,31 +138,9 @@ def move_internal_files(data_dir: Path, app_dir: Path, exports_dir: Path | None 
 
 
 def remove_tree(path: Path):
-    """Σβήσιμο φακέλου ή αρχείου που αντέχει σε αρχεία μόνο-για-ανάγνωση και κλειδωμένα αρχεία."""
-    import shutil
-    import stat
+    from .productdirs import remove_tree as _rm
 
-    def onexc(func, p, exc):
-        try:
-            os.chmod(p, stat.S_IWRITE)
-            func(p)
-        except OSError:
-            pass
-
-    try:
-        if path.is_dir() and not path.is_symlink():
-            if sys.version_info >= (3, 12):
-                shutil.rmtree(path, onexc=onexc)
-            else:
-                shutil.rmtree(path, onerror=lambda f, p, e: onexc(f, p, e[1]))
-        elif path.exists():
-            try:
-                path.unlink()
-            except PermissionError:
-                os.chmod(path, stat.S_IWRITE)
-                path.unlink()
-    except OSError:
-        pass
+    _rm(path)
 
 
 def setup_logging(data_dir: Path):
