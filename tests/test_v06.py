@@ -102,24 +102,108 @@ def test_settings_export_import_keeps_sectors(tmp_path):
     assert c.get("/api/settings/export?format=xlsx").status_code == 200
 
 
-def test_internal_files_move_out_of_documents(tmp_path):
+def test_documents_keep_only_db_settings_products_receipts(tmp_path):
     from pricetracker.app import move_internal_files
 
     docs, app = tmp_path / "Documents" / "PriceTracker", tmp_path / "Local" / "PriceTracker"
-    (docs / "screenshots").mkdir(parents=True)
-    (docs / "Αποδείξεις").mkdir()
+    downloads = tmp_path / "Downloads" / "PriceTracker"
+    (docs / "Αποδείξεις").mkdir(parents=True)
     (docs / "browser-profile").mkdir()
     (docs / "browser-profile" / "x").write_text("1")
-    Database(docs / "pricetracker.db").create_product("Ρολόι")
+    (docs / "exports").mkdir()
+    (docs / "exports" / "a.xlsx").write_text("x")
     (docs / "app.log").write_text("old")
-    (app / "app.log").parent.mkdir(parents=True)
+    app.mkdir(parents=True)
     (app / "app.log").write_text("new")
-    moved = move_internal_files(docs, app)
-    assert "pricetracker.db" in moved and "browser-profile" in moved
-    assert sorted(p.name for p in docs.iterdir()) == sorted(["screenshots", "Αποδείξεις"])
-    assert (app / "app.log").read_text() == "new"
-    assert Database(app / "pricetracker.db").list_products()[0]["name"] == "Ρολόι"
-    assert move_internal_files(docs, app) == []
+    Database(app / "pricetracker.db").create_product("Ρολόι")  # v0.7: η βάση ήταν στο LOCALAPPDATA
+    moved = move_internal_files(docs, app, downloads)
+    assert {"pricetracker.db", "browser-profile", "exports"} <= set(moved)
+    assert sorted(p.name for p in docs.iterdir()) == sorted(["Αποδείξεις", "pricetracker.db"])
+    assert (app / "app.log").read_text() == "new" and (downloads / "a.xlsx").exists()
+    assert Database(docs / "pricetracker.db").list_products()[0]["name"] == "Ρολόι"
+    assert move_internal_files(docs, app, downloads) == []
+
+
+def test_product_folder_dated_and_screenshot_only_first_and_on_drop(tmp_path, monkeypatch):
+    from pricetracker import productdirs
+    from pricetracker.worker import Worker
+
+    db = Database(tmp_path / "db.sqlite")
+    pid = db.create_product("Κουζίνα Pitsos")
+    created = db.get_product(pid)["created_at"][:10]
+    lid = db.add_listing(pid, "https://www.plaisio.gr/p/1")
+    w = Worker(db, tmp_path)
+    prices = iter([300.0, 300.0, 310.0, 289.0])
+    shots = []
+
+    class Info:
+        blocked = None
+        in_stock = True
+        currency = "EUR"
+        title = "Κουζίνα"
+        ean = mpn = brand = image = None
+
+    class Res:
+        html, final_url, status = "", "https://www.plaisio.gr/p/1", 200
+
+    class Br:
+        def open(self, url):
+            return self, Res()
+
+        def close(self):
+            pass
+
+        def screenshot(self, page, path, *a):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"jpg")
+            shots.append(path)
+
+    def fake_extract(html, url):
+        i = Info()
+        i.price = next(prices)
+        return i
+
+    monkeypatch.setattr("pricetracker.worker.extract", fake_extract)
+    settings = db.get_settings()
+    for _ in range(4):
+        l = db.list_listings(product_id=pid, status=None)[0]
+        w._check_one(Br(), l, db.get_product(pid), settings)
+    assert len(shots) == 2  # 1η φορά (ημέρα προσθήκης) και όταν έπεσε 310 → 289
+    folder = tmp_path / "Προϊόντα" / f"{created} Κουζίνα Pitsos"
+    assert all(p.parent == folder for p in shots)
+    # μετονομασία προϊόντος → μετονομάζεται και ο φάκελος, οι διαδρομές στη βάση ενημερώνονται
+    db.update_product(pid, name="Κουζίνα Bosch")
+    productdirs.sync(db, tmp_path, pid)
+    new = tmp_path / "Προϊόντα" / f"{created} Κουζίνα Bosch"
+    assert new.is_dir() and not folder.exists()
+    for rel in db.product_screenshots(pid):
+        assert (tmp_path / rel).exists() and rel.startswith(f"Προϊόντα/{created} Κουζίνα Bosch/")
+    _ = lid
+
+
+def test_old_screenshot_folders_are_moved(tmp_path):
+    from pricetracker import productdirs
+
+    db = Database(tmp_path / "db.sqlite")
+    pid = db.create_product("Ρολόι Casio")
+    lid = db.add_listing(pid, "https://www.plaisio.gr/p/2")
+    old = tmp_path / "screenshots" / f"{pid}_rolo_casio"
+    old.mkdir(parents=True)
+    (old / "a.jpg").write_bytes(b"x")
+    db.record_check(lid, 50.0, "EUR", True, screenshot=f"screenshots\\{pid}_rolo_casio\\a.jpg")
+    productdirs.sync_all(db, tmp_path)
+    rel = next(iter(db.product_screenshots(pid)))
+    assert rel.startswith("Προϊόντα/") and (tmp_path / rel).exists()
+    assert not (tmp_path / "screenshots").exists()
+
+
+def test_settings_file_is_kept_up_to_date(tmp_path):
+    db, c = _app(tmp_path)
+    f = tmp_path / "Ρυθμίσεις.json"
+    assert json.loads(f.read_text(encoding="utf-8"))["kind"] == "settings"
+    c.post("/api/sectors", json={"name": "Κατοικίδια"})
+    assert "Κατοικίδια" in json.loads(f.read_text(encoding="utf-8"))["sectors"]
+
 
 
 def test_new_default_sectors_added_on_upgrade_but_not_deleted_ones(tmp_path):

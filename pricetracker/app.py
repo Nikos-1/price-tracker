@@ -45,11 +45,39 @@ def default_data_dir() -> Path:
     return Path(env) if env else documents_dir() / "PriceTracker"
 
 
-# Τα εσωτερικά αρχεία της εφαρμογής (βάση, logs, προφίλ browser, ενημερώσεις) μένουν στο %LOCALAPPDATA%\PriceTracker.
-# Στα Έγγραφα\PriceTracker μένουν μόνο όσα χρειάζεται να ανοίγει ο χρήστης: αποδείξεις, screenshots και τα Excel.
-INTERNAL_NAMES = ("pricetracker.db", "pricetracker.db-wal", "pricetracker.db-shm", "app.log", "app.log.1",
-                  "app.log.2", "app.log.3", "webview", "browser-profile", "updates")
-DISPOSABLE = ("app.log", "app.log.1", "app.log.2", "app.log.3", "updates", "webview", "browser-profile")
+# Στα Έγγραφα\PriceTracker μένουν μόνο: η βάση (pricetracker.db), οι ρυθμίσεις (Ρυθμίσεις.json), τα προϊόντα
+# (Προϊόντα\<ημερομηνία> <όνομα> με τα screenshots) και οι εγγυήσεις (Αποδείξεις).
+# Τα υπόλοιπα εσωτερικά αρχεία (logs, προφίλ browser, ενημερώσεις) μένουν στο %LOCALAPPDATA%\PriceTracker
+# και τα Excel/εξαγωγές πάνε στις Λήψεις\PriceTracker.
+DB_NAMES = ("pricetracker.db", "pricetracker.db-wal", "pricetracker.db-shm")
+INTERNAL_NAMES = ("app.log", "app.log.1", "app.log.2", "app.log.3", "webview", "browser-profile", "updates")
+DISPOSABLE = INTERNAL_NAMES
+
+
+def downloads_dir() -> Path:
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            from ctypes import wintypes
+            import uuid
+
+            guid = uuid.UUID("374DE290-123F-4565-9164-39C4925E467B")  # FOLDERID_Downloads
+            buf = ctypes.c_wchar_p()
+            GUID = ctypes.c_byte * 16
+            if ctypes.windll.shell32.SHGetKnownFolderPath(GUID.from_buffer_copy(guid.bytes_le), 0, None,
+                                                         ctypes.byref(buf)) == 0 and buf.value:
+                path = Path(buf.value)
+                ctypes.windll.ole32.CoTaskMemFree(buf)
+                return path
+        except Exception:  # noqa: BLE001
+            pass
+    return Path.home() / "Downloads"
+
+
+def default_exports_dir(data_dir: Path) -> Path:
+    if os.environ.get("PRICETRACKER_DATA"):
+        return data_dir / "exports"
+    return downloads_dir() / "PriceTracker"
 
 
 def default_app_dir(data_dir: Path) -> Path:
@@ -59,14 +87,37 @@ def default_app_dir(data_dir: Path) -> Path:
     return Path(base) / "PriceTracker" if base else Path.home() / ".local" / "share" / "PriceTracker"
 
 
-def move_internal_files(data_dir: Path, app_dir: Path) -> list[str]:
-    """Από παλιότερες εκδόσεις: μεταφέρει τα εσωτερικά αρχεία από τα Έγγραφα στον φάκελο της εφαρμογής."""
+def move_internal_files(data_dir: Path, app_dir: Path, exports_dir: Path | None = None) -> list[str]:
+    """Από παλιότερες εκδόσεις: εσωτερικά αρχεία έξω από τα Έγγραφα, η βάση πίσω στα Έγγραφα (v0.7 την είχε στο
+    %LOCALAPPDATA%), τα Excel στις Λήψεις."""
     import shutil
 
     moved = []
-    if Path(data_dir).resolve() == Path(app_dir).resolve():
+    data_dir, app_dir = Path(data_dir), Path(app_dir)
+    if data_dir.resolve() == app_dir.resolve():
         return moved
     app_dir.mkdir(parents=True, exist_ok=True)
+    if not (data_dir / "pricetracker.db").exists() and (app_dir / "pricetracker.db").exists():
+        for name in DB_NAMES:
+            if (app_dir / name).exists():
+                try:
+                    shutil.move(str(app_dir / name), str(data_dir / name))
+                    moved.append(name)
+                except OSError as e:
+                    print(f"Δεν μεταφέρθηκε το {name}: {e}", file=sys.stderr)
+    old_exports = data_dir / "exports"
+    if exports_dir is not None and old_exports.is_dir() and old_exports.resolve() != Path(exports_dir).resolve():
+        try:
+            Path(exports_dir).mkdir(parents=True, exist_ok=True)
+            for f in old_exports.iterdir():
+                dst = Path(exports_dir) / f.name
+                if not dst.exists():
+                    shutil.move(str(f), str(dst))
+            if not any(old_exports.iterdir()):
+                old_exports.rmdir()
+            moved.append("exports")
+        except OSError as e:
+            print(f"Δεν μεταφέρθηκαν τα exports: {e}", file=sys.stderr)
     for name in INTERNAL_NAMES:
         src, dst = data_dir / name, app_dir / name
         if not src.exists():
@@ -238,17 +289,18 @@ def main(argv=None):
     data_dir = Path(args.data) if args.data else default_data_dir()
     app_dir = data_dir if args.data else default_app_dir(data_dir)
     data_dir.mkdir(parents=True, exist_ok=True)
-    moved = move_internal_files(data_dir, app_dir)
+    exports_dir = data_dir / "exports" if args.data else default_exports_dir(data_dir)
+    moved = move_internal_files(data_dir, app_dir, exports_dir)
     setup_logging(app_dir)
     if moved:
-        log.info("Μεταφέρθηκαν από τα Έγγραφα στο %s: %s", app_dir, ", ".join(moved))
-    db = Database(app_dir / "pricetracker.db")
+        log.info("Μεταφέρθηκαν (Έγγραφα / %s / %s): %s", app_dir, exports_dir, ", ".join(moved))
+    db = Database(data_dir / "pricetracker.db")
     shell = Shell(db)
     worker = Worker(db, data_dir, notify_callback=shell.notify, app_dir=app_dir)
     shell.hidden = args.tray
     updater = Updater(db, app_dir, worker=worker, notify=shell.notify, request_quit=lambda: shell.quit(),
                       is_hidden=lambda: shell.hidden)
-    app = create_app(db, worker, data_dir, shell=shell, updater=updater)
+    app = create_app(db, worker, data_dir, shell=shell, updater=updater, exports_dir=exports_dir)
     srv = start_server(app)
     url = f"http://127.0.0.1:{PORT}/"
     log.info("Price Tracker ξεκίνησε, δεδομένα στο %s", data_dir)

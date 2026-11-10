@@ -371,6 +371,20 @@ class Database:
                 (product_id, product_id)).fetchall()
         return {r[0] for r in rows}
 
+    def move_screenshots(self, product_id: int, old_dir: str, new_dir: str):
+        """Οι διαδρομές των screenshots ενός προϊόντος μετά από μετονομασία/μεταφορά του φακέλου του."""
+        old = old_dir.rstrip("/") + "/"
+        new = new_dir.rstrip("/") + "/"
+        with self.conn() as c:
+            ids = [r[0] for r in c.execute("SELECT id FROM listings WHERE product_id=?", (product_id,))]
+            for lid in ids:
+                for table, col, key in (("price_history", "screenshot", "listing_id"), ("listings", "last_screenshot", "id")):
+                    for rid, rel in c.execute(f"SELECT rowid, {col} FROM {table} WHERE {key}=? AND {col} IS NOT NULL",
+                                              (lid,)).fetchall():
+                        posix = rel.replace("\\", "/")
+                        if posix.startswith(old):
+                            c.execute(f"UPDATE {table} SET {col}=? WHERE rowid=?", (new + posix[len(old):], rid))
+
     def listing_screenshots(self, listing_ids) -> set[str]:
         ids = list(listing_ids)
         if not ids:

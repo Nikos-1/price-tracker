@@ -656,7 +656,7 @@ async function renderSettings() {
       <label class="inline"><input type="checkbox" id="s-bfauto" ${s.bf_window_auto ? "checked" : ""}> Περίοδος Black Friday αυτόματα: 20/11 έως 2/12</label>
       <div class="two" id="s-bfdates"><div><label>Αρχή (ΜΜ-ΗΗ)</label><input id="s-bfs" value="${esc(s.bf_start || "11-20")}"></div><div><label>Τέλος (ΜΜ-ΗΗ)</label><input id="s-bfe" value="${esc(s.bf_end || "12-02")}"></div></div>
       <label class="inline"><input type="checkbox" id="s-research" ${s.research_daily ? "checked" : ""}> Μία φορά τη μέρα αναζήτηση των προϊόντων και στα καταστήματα που δεν τα έχουν ακόμα</label>
-      <label>Screenshots</label><select id="s-shot"><option value="changes" ${s.screenshot_mode === "changes" ? "selected" : ""}>Όταν αλλάζει τιμή ή διαθεσιμότητα (και πάντα στην περίοδο Black Friday)</option><option value="always" ${s.screenshot_mode === "always" ? "selected" : ""}>Σε κάθε έλεγχο</option></select>
+      <label>Screenshots</label><select id="s-shot"><option value="changes" ${s.screenshot_mode === "changes" ? "selected" : ""}>Την ημέρα που προστίθεται το προϊόν και μετά μόνο όταν πέφτει η τιμή</option><option value="always" ${s.screenshot_mode === "always" ? "selected" : ""}>Σε κάθε έλεγχο</option></select>
       <label>Παράθυρο browser κατά τους ελέγχους</label><select id="s-bmode">
         <option value="auto" ${s.browser_mode === "auto" ? "selected" : ""}>Κρυφό· ανοίγει μόνο όταν χρειάζεται ενέργειά σου (π.χ. captcha)</option>
         <option value="hidden" ${s.browser_mode === "hidden" ? "selected" : ""}>Πάντα κρυφό (οι σελίδες με captcha παραλείπονται)</option>
@@ -706,7 +706,7 @@ async function renderSettings() {
       <div class="row-btns" style="margin-top:8px"><input id="nsec-name" placeholder="Νέα γενική κατηγορία, π.χ. Είδη κατοικιδίων" style="max-width:340px"><button id="nsec-add">+ Προσθήκη</button></div>
     </div>
     <div class="section"><h3>Εξαγωγή και εισαγωγή ρυθμίσεων</h3>
-      <p class="hint">Το αρχείο ρυθμίσεων περιέχει όλες τις ρυθμίσεις σου και τη λίστα καταστημάτων. Χρησιμεύει ως αντίγραφο ασφαλείας ή για μεταφορά σε άλλον υπολογιστή, με την «Εισαγωγή». Ο κωδικός email δεν αποθηκεύεται στο αρχείο. Τα αρχεία μπαίνουν στον φάκελο Έγγραφα\\PriceTracker\\exports.</p>
+      <p class="hint">Το αρχείο ρυθμίσεων περιέχει όλες τις ρυθμίσεις σου και τη λίστα καταστημάτων. Χρησιμεύει ως αντίγραφο ασφαλείας ή για μεταφορά σε άλλον υπολογιστή, με την «Εισαγωγή». Ο κωδικός email δεν αποθηκεύεται στο αρχείο. Τα αρχεία μπαίνουν στον φάκελο Λήψεις\\PriceTracker. Επίσης, το αρχείο Έγγραφα\\PriceTracker\\Ρυθμίσεις.json ενημερώνεται μόνο του σε κάθε αλλαγή.</p>
       <div class="row-btns">
         <button id="s-exp-json">⬇ Εξαγωγή αρχείου ρυθμίσεων</button>
         <button id="s-exp-xlsx">⬇ Ρυθμίσεις και καταστήματα σε Excel</button>
