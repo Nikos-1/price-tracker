@@ -18,6 +18,13 @@ from .shops import DEFAULT_SHOPS, REGION_LABELS, country_label, currency_of_coun
 
 log = logging.getLogger(__name__)
 
+RETRY_AFTER_S = 600
+BLOCK_STATUS = {403, 429, 503}
+NET_ERROR = re.compile(r"net::ERR_|ERR_NAME_NOT_RESOLVED|ERR_INTERNET_DISCONNECTED|getaddrinfo|Timeout \d+ms exceeded"
+                       r"|timed out|Network is unreachable|ConnectionRefused", re.I)
+ALERT_COOLDOWN_H = 24
+OUTBOX_MAX_AGE_H = 48
+
 
 def _common_paths():
     from .search import COMMON_SEARCH_PATHS
@@ -40,6 +47,13 @@ class Worker:
         self.status = {"running": False, "task": "", "progress": 0, "total": 0,
                        "last_run": None, "next_run": None, "last_error": None, "log": []}
         self.detect: dict[int, dict] = {}  # shop_id → κατάσταση αυτόματης εύρεσης URL αναζήτησης
+        # «Υγεία»: ό,τι σφάλμα θα περνούσε απαρατήρητο εμφανίζεται στην εφαρμογή
+        self.health = {"scheduler_ts": None, "email_error": None, "email_error_at": None,
+                       "backup_ts": None, "backup_error": None}
+        self.backup = None  # συνάρτηση: ημερήσιο αντίγραφο της βάσης στα Έγγραφα (από το app.py)
+        self.retry_at = None  # επανάληψη των σελίδων που απέτυχαν (π.χ. χωρίς δίκτυο στην εκκίνηση)
+        self.current = None  # η εργασία που τρέχει τώρα
+        self._gave_up_hosts: set[str] = set()
         self._stop = threading.Event()
         self._queued_keys: set = set()
         self._lock = threading.Lock()
@@ -95,6 +109,22 @@ class Worker:
                 log.exception("scheduler tick failed")
 
     def _scheduler_tick(self, last: float, last_warranty: float) -> float:
+        self.health["scheduler_ts"] = time.time()
+        if self.backup is not None:
+            try:
+                if self.backup():
+                    self.health["backup_ts"] = time.time()
+                self.health["backup_error"] = None
+            except Exception as e:  # noqa: BLE001
+                log.exception("backup failed")
+                self.health["backup_error"] = str(e)[:300]
+        try:
+            self.retry_outbox()
+        except Exception:  # noqa: BLE001
+            log.exception("email retry failed")
+        if self.retry_at and time.time() >= self.retry_at:
+            self.retry_at = None
+            self.enqueue("retry_failed")
         if time.time() - last_warranty > 6 * 3600:
             last_warranty = time.time()
             try:
@@ -113,7 +143,9 @@ class Worker:
         base = self.status.get("last_run_ts") or last
         nxt = base + hours * 3600
         self.status["next_run"] = datetime.fromtimestamp(nxt).strftime("%Y-%m-%d %H:%M")
-        if time.time() >= nxt and not self.status["running"]:
+        # Ο έλεγχος μπαίνει στην ουρά στην ώρα του, ακόμα κι αν τρέχει άλλη εργασία (π.χ. η ημερήσια αναζήτηση).
+        # Η ουρά δεν βάζει τον ίδιο έλεγχο δύο φορές· μόνο αν τρέχει ήδη έλεγχος όλων, περιμένει να τελειώσει.
+        if time.time() >= nxt and self.current != "check_all":
             self.enqueue("check_all")
             self.status["last_run_ts"] = time.time()
         return last_warranty
@@ -127,11 +159,16 @@ class Worker:
             with self._lock:
                 self._queued_keys.discard(key)
             self.status["running"] = True
+            self.current = kind
             try:
                 if kind == "check_all":
                     self.status["last_run_ts"] = time.time()
                     self.check_listings(self.db.list_listings(status="active"), label="Έλεγχος όλων")
                     self.status["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+                elif kind == "retry_failed":
+                    failed = [l for l in self.db.list_listings(status="active") if l.get("last_error")]
+                    if failed:
+                        self.check_listings(failed, label="Νέα προσπάθεια", retry=False)
                 elif kind == "check_product":
                     self.check_listings(self.db.list_listings(product_id=kw["product_id"], status="active"),
                                         label="Έλεγχος προϊόντος")
@@ -153,6 +190,7 @@ class Worker:
                 self.status["last_error"] = str(e)
                 self._log(f"Σφάλμα: {e}")
             finally:
+                self.current = None
                 self.status.update(running=self.pending() > 0, task="", progress=0, total=0)
 
     # ------------------------------------------------------------ jobs
@@ -192,7 +230,7 @@ class Worker:
             pass
         return None
 
-    def check_listings(self, listings: list[dict], label: str):
+    def check_listings(self, listings: list[dict], label: str, retry: bool = True):
         # Τα αγορασμένα προϊόντα δεν ελέγχονται πια
         products = {p["id"]: p for p in self.db.list_products()}
         listings = [l for l in listings if l["product_id"] in products and not products[l["product_id"]]["purchased"]]
@@ -206,6 +244,8 @@ class Worker:
         except Exception:  # noqa: BLE001
             self.fx = self.db.get_settings().get("fx") or {}
         alerts = []
+        self._gave_up_hosts = set()
+        failed_net = 0
         try:
             with self._browser() as br:
                 for i, l in enumerate(listings, 1):
@@ -226,8 +266,18 @@ class Worker:
                             self.db.record_check(l["id"], None, None, None, error=msg)
                         except Exception:  # noqa: BLE001
                             log.exception("record error failed")
+                        if NET_ERROR.search(msg):
+                            failed_net += 1
                         self._log(f"✗ {l.get('shop_name')}: {msg}")
+        except Exception as e:  # noqa: BLE001 - π.χ. δεν ξεκίνησε ο browser
+            if retry and NET_ERROR.search(str(e)):
+                failed_net += 1
+            raise
         finally:
+            if retry and failed_net and self.retry_at is None:
+                # π.χ. αυτόματη εκκίνηση με τα Windows πριν συνδεθεί το Wi-Fi: νέα προσπάθεια σε 10 λεπτά
+                self.retry_at = time.time() + RETRY_AFTER_S
+                self._log(f"{failed_net} σελίδες δεν άνοιξαν (δίκτυο;), νέα προσπάθεια σε 10 λεπτά")
             # Οι ειδοποιήσεις που μαζεύτηκαν φεύγουν ό,τι κι αν συμβεί στα υπόλοιπα
             if alerts:
                 try:
@@ -241,8 +291,15 @@ class Worker:
         prev = prev_ok[-1] if prev_ok else None
         page, res = br.open(l["url"])
         interactive = False
+        host = host_of(l["url"])
         try:
             info = extract(res.html, res.final_url)
+            if not info.blocked and info.price is None and res.status in BLOCK_STATUS:
+                # π.χ. Akamai/Cloudflare: 403 χωρίς τιμή είναι μπλοκάρισμα, όχι απλό σφάλμα της σελίδας
+                info.blocked = f"Το κατάστημα μπλόκαρε προσωρινά την πρόσβαση (HTTP {res.status})"
+            if info.blocked and host in self._gave_up_hosts:
+                # Ένα captcha σε αυτό το κατάστημα δεν λύθηκε σε αυτόν τον κύκλο: δεν ξαναρωτάμε (ούτε παράθυρα τη νύχτα)
+                raise RuntimeError(info.blocked + " (παραλείφθηκε σε αυτόν τον έλεγχο)")
             if info.blocked and br.headless and self.browser_mode() == "auto":
                 try:
                     page.close()
@@ -252,6 +309,7 @@ class Worker:
                 got = self._ask_user_to_unblock(br, l["url"], info.blocked)
                 if got is None:
                     page = None
+                    self._gave_up_hosts.add(host)
                     raise RuntimeError(info.blocked + " (δεν λύθηκε μέσα σε 3 λεπτά)")
                 page, res = got
                 info = extract(res.html, res.final_url)
@@ -262,8 +320,8 @@ class Worker:
             if info.price is None and info.in_stock is None:
                 raise RuntimeError("Δεν βρέθηκε τιμή ή διαθεσιμότητα στη σελίδα")
             in_stock = info.in_stock if info.in_stock is not None else (info.price is not None)
-            # Νόμισμα: από τη σελίδα, αλλιώς αυτό που όρισε ο χρήστης, αλλιώς από τη χώρα του καταστήματος
-            info.currency = info.currency or l.get("currency_override") or currency_of_country(l.get("country"))
+            # Νόμισμα: αυτό που διάλεξε ο χρήστης (υπερισχύει), αλλιώς από τη σελίδα, αλλιώς από τη χώρα του καταστήματος
+            info.currency = l.get("currency_override") or info.currency or currency_of_country(l.get("country"))
             if info.price is not None and not info.currency:
                 self._ask_currency(l, product)
             shot = None
@@ -342,8 +400,12 @@ class Worker:
                 "price": price, "currency": currency, "price_eur": price_eur,
                 "url": l["url"], "target": product.get("target_price"),
                 "screenshot": str(self.data_dir / shot) if shot else None}
+        base["listing_id"] = l.get("id")
         out = []
-        if settings.get("notify_back_in_stock", True) and in_stock and not prev["in_stock"]:
+        ok_stock = [h for h in prev_ok if h["in_stock"] is not None]
+        # «Ξανά διαθέσιμο» μόνο αν ήταν εξαντλημένο σε δύο συνεχόμενους ελέγχους (όχι από μία λάθος ανάγνωση)
+        was_out = bool(ok_stock) and not ok_stock[-1]["in_stock"] and (len(ok_stock) < 2 or not ok_stock[-2]["in_stock"])
+        if settings.get("notify_back_in_stock", True) and in_stock and was_out:
             out.append({**base, "kind": "in_stock"})
         tgt = product.get("target_price")
         prev_eur = prev.get("price_eur") if "price_eur" in prev.keys() else None
@@ -354,12 +416,36 @@ class Worker:
                 not (prev_eur and prev_eur <= tgt and prev["in_stock"]):
             out.append({**base, "kind": "target"})
         if settings.get("notify_new_low", True) and price and in_stock and not out:
-            prices = [h["price"] for h in prev_ok if h["price"]]
-            if len(prices) >= 3 and price < min(prices) * 0.99:
+            # Σε €, ώστε τιμές σε ξένο νόμισμα να συγκρίνονται σωστά
+            def eur_of(h):
+                v = h["price_eur"] if "price_eur" in h.keys() else None
+                return v if v is not None else (h["price"] if (h.get("currency") or "EUR").upper() == "EUR" else None)
+
+            prices = [v for v in (eur_of(h) for h in prev_ok if h["price"]) if v]
+            if price_eur and len(prices) >= 3 and price_eur < min(prices) * 0.99:
                 out.append({**base, "kind": "new_low"})
-        return out
+        return [a for a in out if not self._recently_sent(a)]
+
+    def _recently_sent(self, a) -> bool:
+        """Η ίδια ειδοποίηση για την ίδια σελίδα δεν ξαναστέλνεται μέσα σε 24 ώρες, εκτός αν η τιμή έπεσε κι άλλο."""
+        last = self.db.last_alert(a["listing_id"], a["kind"])
+        if not last:
+            return False
+        age_h = (datetime.now() - datetime.fromisoformat(last["sent_at"])).total_seconds() / 3600
+        if age_h >= ALERT_COOLDOWN_H:
+            return False
+        if a["kind"] != "in_stock" and a.get("price_eur") and last.get("price_eur") \
+                and a["price_eur"] < last["price_eur"] * 0.99:
+            return False
+        return True
 
     def _send_alerts(self, alerts, settings):
+        for a in alerts:
+            if a.get("listing_id"):
+                try:
+                    self.db.record_alert(a["listing_id"], a["kind"], a.get("price_eur"))
+                except Exception:  # noqa: BLE001
+                    log.exception("record alert failed")
         subject, text, body = notifier.format_alerts(alerts)
         if self.notify_callback:
             try:
@@ -367,13 +453,48 @@ class Worker:
             except Exception:  # noqa: BLE001
                 pass
         if settings.get("email_enabled"):
-            try:
-                pw = notifier.load_password(self.db, settings.get("smtp_user", ""))
-                notifier.send_email(settings, pw, subject, text, body,
-                                    [Path(a["screenshot"]) for a in alerts if a.get("screenshot")])
-                self._log(f"Στάλθηκε email: {subject}")
-            except Exception as e:  # noqa: BLE001
-                self._log(f"Αποτυχία email: {e}")
+            self._email(settings, subject, text, body, [a["screenshot"] for a in alerts if a.get("screenshot")])
+
+    def _email(self, settings, subject, text, body=None, attachments=None, queue_on_fail=True) -> bool:
+        """Στέλνει email. Αν αποτύχει, μπαίνει σε ουρά και ξαναδοκιμάζεται (έως 48 ώρες), και το σφάλμα
+        φαίνεται στην εφαρμογή αντί να χάνεται σε ένα log."""
+        try:
+            pw = notifier.load_password(self.db, settings.get("smtp_user", ""))
+            notifier.send_email(settings, pw, subject, text, body, [Path(p) for p in attachments or []])
+            self._log(f"Στάλθηκε email: {subject}")
+            self.health.update(email_error=None, email_error_at=None)
+            return True
+        except Exception as e:  # noqa: BLE001
+            msg = (str(e).splitlines() or [type(e).__name__])[0][:300]
+            self._log(f"Αποτυχία email: {msg}")
+            self.health.update(email_error=msg, email_error_at=datetime.now().strftime("%d/%m %H:%M"))
+            if queue_on_fail:
+                box = list(self.db.get_settings().get("email_outbox") or [])
+                box.append({"subject": subject, "text": text, "body": body, "attachments": list(attachments or []),
+                            "ts": time.time(), "tries": 1})
+                self.db.set_settings({"email_outbox": box[-50:]})
+            return False
+
+    def retry_outbox(self, force: bool = False):
+        """Ξαναστέλνει τα email που απέτυχαν (κάθε 15 λεπτά)."""
+        settings = self.db.get_settings()
+        box = list(settings.get("email_outbox") or [])
+        if not box or not settings.get("email_enabled"):
+            return
+        if not force and time.time() - getattr(self, "_last_outbox_try", 0) < 900:
+            return
+        self._last_outbox_try = time.time()
+        keep = []
+        for i, m in enumerate(box):
+            if time.time() - float(m.get("ts") or 0) > OUTBOX_MAX_AGE_H * 3600:
+                self._log(f"Το email «{m.get('subject')}» δεν στάλθηκε μέσα σε 48 ώρες και διαγράφηκε")
+                continue
+            if self._email(settings, m["subject"], m["text"], m.get("body"), m.get("attachments"), queue_on_fail=False):
+                continue
+            m["tries"] = int(m.get("tries") or 1) + 1
+            keep = [m] + box[i + 1:]  # ο server δεν απαντά: τα υπόλοιπα την επόμενη φορά
+            break
+        self.db.set_settings({"email_outbox": keep})
 
     def check_warranties(self, today=None):
         """Ειδοποίηση μία φορά όταν πλησιάζει η λήξη μιας εγγύησης."""
@@ -402,12 +523,8 @@ class Worker:
                 self.notify_callback(subject.replace("[Price Tracker] ", ""))
             except Exception:  # noqa: BLE001
                 pass
-        if settings.get("email_enabled"):
-            try:
-                pw = notifier.load_password(self.db, settings.get("smtp_user", ""))
-                notifier.send_email(settings, pw, subject, text)
-            except Exception as e:  # noqa: BLE001
-                self._log(f"Αποτυχία email εγγύησης: {e}")
+        if settings.get("email_enabled") and not self._email(settings, subject, text, queue_on_fail=False):
+            return []  # δεν σημειώνεται «σταλμένη»: ξαναδοκιμάζει στον επόμενο έλεγχο εγγυήσεων
         self.db.set_settings({"warranty_notified": sorted(sent | {k for _, _, k in due})})
         self._log(subject.replace("[Price Tracker] ", ""))
         return due

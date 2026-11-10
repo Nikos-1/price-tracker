@@ -120,3 +120,9 @@ tr.group-row td { background: var(--chip); font-weight: 600; font-size: 12px; te
 .warn-box select { width: auto; margin-top: 4px; padding: 2px 6px; }
 .sec-btn { max-width: 190px; white-space: normal; text-align: left; }
 .sec-list { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 16px; margin: 8px 0; }
+
+/* «Υγεία»: προβλήματα που αλλιώς θα περνούσαν απαρατήρητα */
+.topbar { flex-wrap: wrap; }
+.health { flex-basis: 100%; order: 10; color: var(--warn); font-size: 13px; line-height: 1.5; }
+.health.hidden { display: none; }
+.status .warn { color: var(--warn); }

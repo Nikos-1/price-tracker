@@ -102,7 +102,7 @@ def test_settings_export_import_keeps_sectors(tmp_path):
     assert c.get("/api/settings/export?format=xlsx").status_code == 200
 
 
-def test_documents_keep_only_db_settings_products_receipts(tmp_path):
+def test_documents_keep_only_settings_products_receipts(tmp_path):
     from pricetracker.app import move_internal_files
 
     docs, app = tmp_path / "Documents" / "PriceTracker", tmp_path / "Local" / "PriceTracker"
@@ -115,12 +115,10 @@ def test_documents_keep_only_db_settings_products_receipts(tmp_path):
     (docs / "app.log").write_text("old")
     app.mkdir(parents=True)
     (app / "app.log").write_text("new")
-    Database(app / "pricetracker.db").create_product("Ρολόι")  # v0.7: η βάση ήταν στο LOCALAPPDATA
     moved = move_internal_files(docs, app, downloads)
-    assert {"pricetracker.db", "browser-profile", "exports"} <= set(moved)
-    assert sorted(p.name for p in docs.iterdir()) == sorted(["Αποδείξεις", "pricetracker.db"])
+    assert {"browser-profile", "exports"} <= set(moved)
+    assert sorted(p.name for p in docs.iterdir()) == ["Αποδείξεις"]
     assert (app / "app.log").read_text() == "new" and (downloads / "a.xlsx").exists()
-    assert Database(docs / "pricetracker.db").list_products()[0]["name"] == "Ρολόι"
     assert move_internal_files(docs, app, downloads) == []
 
 

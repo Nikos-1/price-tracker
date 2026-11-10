@@ -11,6 +11,7 @@ import urllib.request
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
+from . import __version__, dbfile
 from .db import Database
 from .web import create_app
 from .updater import Updater
@@ -45,10 +46,10 @@ def default_data_dir() -> Path:
     return Path(env) if env else documents_dir() / "PriceTracker"
 
 
-# Στα Έγγραφα\PriceTracker μένουν μόνο: η βάση (pricetracker.db), οι ρυθμίσεις (Ρυθμίσεις.json), τα προϊόντα
-# (Προϊόντα\<ημερομηνία> <όνομα> με τα screenshots) και οι εγγυήσεις (Αποδείξεις).
-# Τα υπόλοιπα εσωτερικά αρχεία (logs, προφίλ browser, ενημερώσεις) μένουν στο %LOCALAPPDATA%\PriceTracker
-# και τα Excel/εξαγωγές πάνε στις Λήψεις\PriceTracker.
+# Στα Έγγραφα\PriceTracker μένουν μόνο: το ημερήσιο αντίγραφο της βάσης (Αντίγραφο βάσης.db), οι ρυθμίσεις
+# (Ρυθμίσεις.json), τα προϊόντα (Προϊόντα\<ημερομηνία> <όνομα> με τα screenshots) και οι εγγυήσεις (Αποδείξεις).
+# Η ζωντανή βάση και τα εσωτερικά αρχεία (logs, προφίλ browser, ενημερώσεις) μένουν στο %LOCALAPPDATA%\PriceTracker
+# (δεν συγχρονίζεται με το OneDrive) και τα Excel/εξαγωγές πάνε στις Λήψεις\PriceTracker.
 DB_NAMES = ("pricetracker.db", "pricetracker.db-wal", "pricetracker.db-shm")
 INTERNAL_NAMES = ("app.log", "app.log.1", "app.log.2", "app.log.3", "webview", "browser-profile", "updates")
 DISPOSABLE = INTERNAL_NAMES
@@ -88,8 +89,8 @@ def default_app_dir(data_dir: Path) -> Path:
 
 
 def move_internal_files(data_dir: Path, app_dir: Path, exports_dir: Path | None = None) -> list[str]:
-    """Από παλιότερες εκδόσεις: εσωτερικά αρχεία έξω από τα Έγγραφα, η βάση πίσω στα Έγγραφα (v0.7 την είχε στο
-    %LOCALAPPDATA%), τα Excel στις Λήψεις."""
+    """Από παλιότερες εκδόσεις: εσωτερικά αρχεία έξω από τα Έγγραφα, τα Excel στις Λήψεις.
+    Η βάση μεταφέρεται χωριστά (dbfile.place_live_db)."""
     import shutil
 
     moved = []
@@ -97,14 +98,6 @@ def move_internal_files(data_dir: Path, app_dir: Path, exports_dir: Path | None 
     if data_dir.resolve() == app_dir.resolve():
         return moved
     app_dir.mkdir(parents=True, exist_ok=True)
-    if not (data_dir / "pricetracker.db").exists() and (app_dir / "pricetracker.db").exists():
-        for name in DB_NAMES:
-            if (app_dir / name).exists():
-                try:
-                    shutil.move(str(app_dir / name), str(data_dir / name))
-                    moved.append(name)
-                except OSError as e:
-                    print(f"Δεν μεταφέρθηκε το {name}: {e}", file=sys.stderr)
     old_exports = data_dir / "exports"
     if exports_dir is not None and old_exports.is_dir() and old_exports.resolve() != Path(exports_dir).resolve():
         try:
@@ -255,6 +248,32 @@ class Shell:
             winreg.CloseKey(key)
 
 
+_INSTANCE_LOCK = None
+
+
+def acquire_instance_lock(app_dir: Path) -> bool:
+    """Μία μόνο εκτέλεση της εφαρμογής ανά φάκελο: δύο ταυτόχρονα θα έγραφαν στην ίδια βάση και στο ίδιο
+    προφίλ browser («δεν βρέθηκε browser»). Το κλείδωμα λύνεται μόνο του όταν κλείσει η εφαρμογή."""
+    global _INSTANCE_LOCK
+    app_dir.mkdir(parents=True, exist_ok=True)
+    f = open(app_dir / "instance.lock", "a+")  # noqa: SIM115 - μένει ανοιχτό όσο τρέχει η εφαρμογή
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+
+            f.seek(0)
+            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        f.close()
+        return False
+    _INSTANCE_LOCK = f
+    return True
+
+
 def already_running() -> bool:
     try:
         req = urllib.request.Request(f"http://127.0.0.1:{PORT}/api/window/show", data=b"{}", method="POST",
@@ -308,6 +327,9 @@ def main(argv=None):
     data_dir = Path(args.data) if args.data else default_data_dir()
     app_dir = data_dir if args.data else default_app_dir(data_dir)
     data_dir.mkdir(parents=True, exist_ok=True)
+    if not acquire_instance_lock(app_dir):
+        already_running()  # εμφανίζει το παράθυρο της εκτέλεσης που τρέχει ήδη
+        return 0
     exports_dir = data_dir / "exports" if args.data else default_exports_dir(data_dir)
     moved = move_internal_files(data_dir, app_dir, exports_dir)
     setup_logging(app_dir)
@@ -316,9 +338,19 @@ def main(argv=None):
             log.warning("Έμεινε στα Έγγραφα (θα σβηστεί στην επόμενη εκκίνηση): %s", data_dir / name)
     if moved:
         log.info("Μεταφέρθηκαν (Έγγραφα / %s / %s): %s", app_dir, exports_dir, ", ".join(moved))
-    db = Database(data_dir / "pricetracker.db")
+    db_path, db_events = dbfile.place_live_db(data_dir, app_dir)
+    for e in db_events:
+        log.warning("Βάση: %s", e)
+    try:
+        if dbfile.backup_before_update(db_path, app_dir, __version__):
+            log.info("Αντίγραφο της βάσης πριν την ενημέρωση: %s", app_dir / dbfile.PRE_UPDATE_NAME)
+    except Exception:  # noqa: BLE001
+        log.exception("pre-update backup failed")
+    db = Database(db_path)
+    db.set_settings({"app_version": __version__})
     shell = Shell(db)
     worker = Worker(db, data_dir, notify_callback=shell.notify, app_dir=app_dir)
+    worker.backup = lambda force=False: dbfile.backup_if_due(db_path, data_dir, force=force)
     shell.hidden = args.tray
     updater = Updater(db, app_dir, worker=worker, notify=shell.notify, request_quit=lambda: shell.quit(),
                       is_hidden=lambda: shell.hidden)

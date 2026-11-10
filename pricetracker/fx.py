@@ -34,7 +34,7 @@ def parse_ecb_xml(text: str) -> tuple[str | None, dict[str, float]]:
 
 def _get(url: str) -> str:
     req = urllib.request.Request(url, headers={"User-Agent": f"PriceTracker/{__version__}"})
-    with urllib.request.urlopen(req, timeout=20) as r:
+    with urllib.request.urlopen(req, timeout=8) as r:  # χωρίς δίκτυο να μην κολλά το παράθυρο
         return r.read().decode("utf-8")
 
 

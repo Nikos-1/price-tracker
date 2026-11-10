@@ -38,17 +38,47 @@ CURRENCY_SYMBOLS = {"€": "EUR", "eur": "EUR", "£": "GBP", "$": "USD", "zł": 
                     "lei": "RON", "huf": "HUF", "ft": "HUF", "bgn": "BGN", "лв": "BGN", "dkk": "DKK"}
 
 
+# Νομίσματα με ισοτιμία της ΕΚΤ: μόνο αυτά δέχεται η εφαρμογή ως κωδικό νομίσματος
+ISO_CODES = {"EUR", "USD", "JPY", "BGN", "CZK", "DKK", "GBP", "HUF", "PLN", "RON", "SEK", "CHF", "ISK", "NOK",
+             "TRY", "AUD", "BRL", "CAD", "CNY", "HKD", "IDR", "ILS", "INR", "KRW", "MXN", "MYR", "NZD", "PHP",
+             "SGD", "THB", "ZAR"}
+_ALPHA_SYMBOLS = {k: v for k, v in CURRENCY_SYMBOLS.items() if k.isalpha()}
+_SIGN_SYMBOLS = {k: v for k, v in CURRENCY_SYMBOLS.items() if not k.isalpha()}
+
+
+def normalize_currency(value) -> str | None:
+    """«€», «eur», «EUR» → «EUR». Ό,τι δεν είναι γνωστό νόμισμα → None (θα ρωτηθεί ο χρήστης)."""
+    if not value:
+        return None
+    v = str(value).strip()
+    code = CURRENCY_SYMBOLS.get(v.lower()) or v.upper()
+    return code if code in ISO_CODES else None
+
+
+_SPACES = re.compile(r"[\s\u00a0\u1680\u2000-\u200b\u202f\u205f\u3000]+")
+_NUM = r"\d+(?:[ .,'’]\d{3}(?!\d))*(?:[.,]\d{1,2}(?!\d))?"
+_SYM = r"€|EUR|£|GBP|\$|USD|zł|PLN|Kč|CZK|SEK|CHF|lei|RON|Ft|HUF|лв|BGN|DKK|kr"
+_PCT = re.compile(r"[-−–]?\s*\d+(?:[.,]\d+)?\s*%")
+
+
 def parse_price(text) -> float | None:
-    """Μετατρέπει «1.234,56 €», «€1,234.56», «1 234,56», «349» σε float."""
+    """Μετατρέπει «1.234,56 €», «€1,234.56», «1 234,56», «349» σε float.
+    Αγνοεί ποσοστά («-20%») και προτιμά τον αριθμό που έχει δίπλα του νόμισμα («Από 3 δόσεις των 99 €»)."""
     if text is None:
         return None
     if isinstance(text, (int, float)):
         return float(text) if text > 0 else None
-    s = str(text).replace("\xa0", " ").replace(" ", " ").strip()
-    m = re.search(r"\d+(?:[ .,'’]\d{3}(?!\d))*(?:[.,]\d{1,2}(?!\d))?", s)
-    if not m:
-        return None
-    num = m.group(0).strip().replace(" ", "").replace("'", "").replace("’", "")
+    s = _SPACES.sub(" ", str(text)).strip()
+    s = _PCT.sub(" ", s)
+    m = re.search(rf"(?:{_SYM})\s?({_NUM})|({_NUM})\s?(?:,-)?\s?(?:{_SYM})", s, re.I)
+    if m:
+        num = m.group(1) or m.group(2)
+    else:
+        m = re.search(_NUM, s)
+        if not m:
+            return None
+        num = m.group(0)
+    num = num.strip().replace(" ", "").replace("'", "").replace("’", "")
     if "," in num and "." in num:
         if num.rfind(",") > num.rfind("."):
             num = num.replace(".", "").replace(",", ".")
@@ -92,14 +122,22 @@ def currency_for_host(host: str) -> str | None:
 
 
 def detect_currency(text, default=None) -> str | None:
+    """Νόμισμα από κείμενο τιμής. Οι λέξεις (eur, kr, ft…) μετράνε μόνο ως ξεχωριστές λέξεις, ώστε το «left»
+    να μη διαβάζεται ως φιορίνι και το «incl. VAT» ως νόμισμα «VAT»."""
     if not text:
         return default
-    t = str(text).lower()
-    for sym, code in CURRENCY_SYMBOLS.items():
-        if sym in t:
+    t = _SPACES.sub(" ", str(text))
+    low = t.lower()
+    for sym, code in _SIGN_SYMBOLS.items():
+        if sym in low:
             return code
-    m = re.search(r"\b([A-Z]{3})\b", str(text))
-    return m.group(1) if m else default
+    for sym, code in _ALPHA_SYMBOLS.items():
+        if re.search(rf"(?<![^\W\d_]){re.escape(sym)}(?![^\W\d_])", low):
+            return code
+    for m in re.finditer(r"\b([A-Z]{3})\b", t):
+        if m.group(1) in ISO_CODES:
+            return m.group(1)
+    return default
 
 
 AVAIL_IN = ["instock", "in_stock", "limitedavailability", "onlineonly", "instoreonly"]
@@ -128,7 +166,7 @@ OUT_PHRASES = [
     "dieses angebot wurde beendet", "this listing has ended", "angebot beendet",
 ]
 IN_PHRASES = [
-    "άμεσα διαθέσιμο", "διαθέσιμο", "σε απόθεμα", "παράδοση σε",
+    "άμεσα διαθέσιμο", "διαθέσιμο", "σε απόθεμα", "παράδοση σε", "προσθήκη στο καλάθι", "στο καλάθι",
     "in stock", "add to cart", "auf lager", "in den einkaufswagen", "sofort lieferbar",
     "disponibilità immediata", "disponibile", "aggiungi al carrello", "en stock",
     "ajouter au panier", "añadir a la cesta", "sofort versandfertig",
@@ -148,8 +186,54 @@ def availability_from_text(text: str) -> bool | None:
     return None
 
 
+def _phrases_in(text: str):
+    """(βρέθηκε «μη διαθέσιμο», βρέθηκε «διαθέσιμο») χωρίς να μετρά το «διαθέσιμο» μέσα στο «μη διαθέσιμο»."""
+    t = " ".join((text or "").lower().split())
+    out = any(p in t for p in OUT_PHRASES)
+    for p in sorted(OUT_PHRASES, key=len, reverse=True):
+        t = t.replace(p, " ")
+    return out, any(p in t for p in IN_PHRASES)
+
+
+CART_WORDS = ["add to cart", "add to basket", "προσθήκη στο καλάθι", "στο καλάθι", "αγορά τώρα", "buy now",
+              "in den warenkorb", "aggiungi al carrello", "ajouter au panier", "añadir a la cesta",
+              "añadir al carrito", "do koszyka", "do košíku", "lägg i varukorgen"]
+PRODUCT_AREAS = ["[itemtype*='schema.org/Product']", "main .product", "#product", ".product-info", ".product-details",
+                 ".product-main", ".product-page", "main"]
+
+
+def availability_from_page(soup) -> bool | None:
+    """Διαθεσιμότητα όταν δεν τη λέει η σελίδα με δομημένα δεδομένα. Ένα ενεργό κουμπί «στο καλάθι» μετράει
+    περισσότερο από λέξεις κάπου στη σελίδα (π.χ. «Εξαντλήθηκε» σε σχετικά προϊόντα)."""
+    disabled_cart = False
+    for b in soup.select("button, input[type=submit], a[class*=cart], a[class*=basket]"):
+        label = " ".join([_text(b), str(b.get("value") or ""), str(b.get("aria-label") or ""),
+                          str(b.get("title") or "")]).lower()
+        if any(w in label for w in CART_WORDS):
+            disabled = b.has_attr("disabled") or str(b.get("aria-disabled")).lower() == "true" \
+                or "disabled" in " ".join(b.get("class") or []).lower()
+            if not disabled:
+                return True
+            disabled_cart = True
+    for sel in PRODUCT_AREAS:
+        el = soup.select_one(sel)
+        if el is None:
+            continue
+        out, inn = _phrases_in(_text(el)[:8000])
+        if out and disabled_cart:  # «Εξαντλήθηκε» και ανενεργό κουμπί καλαθιού
+            return False
+        if out != inn:
+            return inn
+        break
+    body = soup.body.get_text(" ") if soup.body else ""
+    out, inn = _phrases_in(body[:20000])
+    if out != inn:  # μόνο όταν η σελίδα λέει καθαρά το ένα από τα δύο
+        return inn
+    return None
+
+
 # ---------------------------------------------------------------- JSON-LD
-def _iter_jsonld(soup):
+def _iter_jsonld(soup, deep: bool = True):
     for tag in soup.find_all("script", attrs={"type": re.compile("ld\\+json", re.I)}):
         raw = tag.string or tag.get_text() or ""
         raw = raw.strip()
@@ -169,7 +253,8 @@ def _iter_jsonld(soup):
                 stack.extend(d)
             elif isinstance(d, dict):
                 yield d
-                for k in ("@graph", "mainEntity", "itemListElement"):
+                # Στο πρώτο πέρασμα όχι στις λίστες (σχετικά προϊόντα, breadcrumbs): μόνο το κύριο προϊόν
+                for k in ("@graph", "mainEntity", "hasVariant") + (("itemListElement",) if deep else ()):
                     if k in d:
                         stack.append(d[k])
 
@@ -188,8 +273,34 @@ def _first(v):
 
 
 def from_jsonld(soup) -> ProductInfo:
+    info = _from_jsonld(soup, deep=False)
+    if info.price is None:
+        info.merge(_from_jsonld(soup, deep=True), "jsonld")
+    return info
+
+
+def _offer_price(o: dict):
+    """Η τιμή μιας προσφοράς. Από τα priceSpecification αγνοεί την παλιά/διαγραμμένη τιμή (StrikethroughPrice)."""
+    if "aggregateoffer" in _types(o):
+        return parse_price(o.get("lowPrice") or o.get("price"))
+    price = parse_price(o.get("price"))
+    if price is None and isinstance(o.get("priceSpecification"), (dict, list)):
+        specs = o["priceSpecification"] if isinstance(o["priceSpecification"], list) else [o["priceSpecification"]]
+        for ps in specs:
+            if not isinstance(ps, dict):
+                continue
+            kind = str(ps.get("priceType") or "").lower()
+            if any(k in kind for k in ("strikethrough", "listprice", "msrp", "srp")):
+                continue
+            price = parse_price(ps.get("price"))
+            if price is not None:
+                break
+    return price
+
+
+def _from_jsonld(soup, deep: bool) -> ProductInfo:
     info = ProductInfo()
-    for d in _iter_jsonld(soup):
+    for d in _iter_jsonld(soup, deep):
         if not any(t in ("product", "productgroup", "individualproduct") for t in _types(d)):
             continue
         p = ProductInfo()
@@ -203,31 +314,23 @@ def from_jsonld(soup) -> ProductInfo:
         p.image = img.get("url") if isinstance(img, dict) else img
         offers = d.get("offers")
         offer_list = offers if isinstance(offers, list) else [offers] if offers else []
-        best = None
-        any_in = None
+        cands = []
         for o in offer_list:
             if not isinstance(o, dict):
                 continue
-            price = None
-            if "aggregateoffer" in _types(o):
-                price = parse_price(o.get("lowPrice") or o.get("price"))
-            else:
-                price = parse_price(o.get("price"))
-                if price is None and isinstance(o.get("priceSpecification"), (dict, list)):
-                    ps = _first(o["priceSpecification"])
-                    price = parse_price(ps.get("price")) if isinstance(ps, dict) else None
+            price = _offer_price(o)
             avail = availability_from_schema(o.get("availability"))
             if "aggregateoffer" in _types(o) and avail is None and (o.get("offerCount") or 0):
                 avail = True
-            if avail:
-                any_in = True
-            elif avail is False and any_in is None:
-                any_in = False
-            if price is not None and (best is None or (avail is not False and price < best[0])):
-                best = (price, o.get("priceCurrency"), avail)
-        if best:
+            if price is not None:
+                cands.append((price, o.get("priceCurrency"), avail))
+        # Η φθηνότερη προσφορά που ΜΠΟΡΕΙΣ να αγοράσεις· μια φθηνή αλλά εξαντλημένη δεν είναι «σε απόθεμα»
+        buyable = [c for c in cands if c[2] is not False]
+        pool = buyable or cands
+        if pool:
+            best = min(pool, key=lambda c: c[0])
             p.price, p.currency = best[0], best[1]
-            p.in_stock = any_in if any_in is not None else best[2]
+            p.in_stock = best[2] if best[2] is not None else (True if any(c[2] for c in cands) else None)
         info.merge(p, "jsonld")
         if info.price is not None:
             break
@@ -347,14 +450,35 @@ GENERIC_AVAIL_SELECTORS = [
 ]
 
 
+OLD_PRICE = re.compile(r"old|was|regular|strike|before|initial|previous|compare|list-?price|rrp|msrp|crossed", re.I)
+
+
+def _is_old_price(el) -> bool:
+    return el.name in ("del", "s", "strike") or bool(OLD_PRICE.search(" ".join(el.get("class") or [])))
+
+
+def _without_old_prices(el):
+    """Αντίγραφο του στοιχείου χωρίς παλιές/διαγραμμένες τιμές (<del>, .old-price…) και ποσοστά έκπτωσης."""
+    import copy
+
+    el = copy.copy(el)
+    for x in list(el.find_all(True)):
+        if x.decomposed:
+            continue
+        if _is_old_price(x) or re.search(r"discount|badge|percent|saving", " ".join(x.get("class") or []), re.I):
+            x.decompose()
+    return el
+
+
 def from_generic(soup) -> ProductInfo:
     p = ProductInfo()
     h1 = soup.find("h1")
     p.title = _text(h1) or None
     for s in GENERIC_PRICE_SELECTORS:
-        el = soup.select_one(s)
+        el = next((e for e in soup.select(s) if not _is_old_price(e)), None)
         if el is None:
             continue
+        el = _without_old_prices(el)
         val = el.get("data-price") or _text(el)
         price = parse_price(val)
         if price:
@@ -403,8 +527,8 @@ def extract(html: str, url: str = "") -> ProductInfo:
         info.blocked = "Το κατάστημα ζήτησε επιβεβαίωση ότι δεν είσαι ρομπότ (captcha)"
         return info
     if info.in_stock is None and info.price is not None:
-        body = soup.body.get_text(" ") if soup.body else ""
-        info.in_stock = availability_from_text(body[:20000])
+        info.in_stock = availability_from_page(soup)
+    info.currency = normalize_currency(info.currency)
     if info.currency is None and info.price is not None:
         info.currency = currency_for_host(host)
     if info.title:
