@@ -256,3 +256,33 @@ def test_leftover_browser_cache_is_removed_even_if_read_only(tmp_path):
     moved = move_internal_files(docs, app)
     assert not (docs / "browser-profile").exists() and "browser-profile" in moved
     assert (app / "webview" / "x").exists() and not (docs / "webview").exists()
+
+
+def test_deleting_product_removes_all_its_files_and_folders(tmp_path):
+    import os
+    import stat
+
+    from pricetracker import productdirs
+
+    db, c = _app(tmp_path)
+    pid = db.create_product("Ρολόι Casio")
+    other = db.create_product("Κουζίνα")
+    created = db.get_product(pid)["created_at"][:10]
+    lid = db.add_listing(pid, "https://www.plaisio.gr/p/9")
+    folder = tmp_path / "Προϊόντα" / f"{created} Ρολόι Casio"
+    folder.mkdir(parents=True)
+    shot = folder / "a.jpg"
+    shot.write_bytes(b"x")
+    (folder / "χωρίς εγγραφή στη βάση.jpg").write_bytes(b"y")
+    os.chmod(shot, stat.S_IREAD)
+    db.record_check(lid, 50.0, "EUR", True, screenshot=f"Προϊόντα/{created} Ρολόι Casio/a.jpg")
+    old = tmp_path / "screenshots" / f"{pid}_rologi"
+    old.mkdir(parents=True)
+    (old / "b.jpg").write_bytes(b"z")
+    keep = tmp_path / "Προϊόντα" / f"{created} Κουζίνα"
+    keep.mkdir()
+    (keep / "k.jpg").write_bytes(b"k")
+    assert c.delete(f"/api/products/{pid}").status_code == 200
+    assert not folder.exists() and not old.exists() and not (tmp_path / "screenshots").exists()
+    assert (keep / "k.jpg").exists()
+    _ = (other, productdirs)
