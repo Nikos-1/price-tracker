@@ -22,6 +22,7 @@ class ProductInfo:
     image: str | None = None
     blocked: str | None = None  # π.χ. captcha
     source: list[str] = field(default_factory=list)
+    price_source: str | None = None  # από πού διαβάστηκε η τιμή: jsonld, meta, generic, amazon…
 
     def merge(self, other: "ProductInfo", tag: str):
         changed = False
@@ -29,6 +30,8 @@ class ProductInfo:
             if getattr(self, k) is None and getattr(other, k) is not None:
                 setattr(self, k, getattr(other, k))
                 changed = True
+                if k == "price":
+                    self.price_source = other.price_source or tag
         if changed:
             self.source.append(tag)
 
@@ -57,8 +60,13 @@ def normalize_currency(value) -> str | None:
 
 _SPACES = re.compile(r"[\s\u00a0\u1680\u2000-\u200b\u202f\u205f\u3000]+")
 _NUM = r"\d+(?:[ .,'’]\d{3}(?!\d))*(?:[.,]\d{1,2}(?!\d))?"
-_SYM = r"€|EUR|£|GBP|\$|USD|zł|PLN|Kč|CZK|SEK|CHF|lei|RON|Ft|HUF|лв|BGN|DKK|kr"
+# Τα αλφαβητικά σύμβολα μετράνε μόνο ως ξεχωριστές λέξεις: το «Microsoft 365» δεν είναι «Ft 365»
+_SYM = (r"€|£|\$|zł|Kč|лв|(?<![^\W\d_])(?:EUR|GBP|USD|PLN|CZK|SEK|CHF|lei|RON|Ft|HUF|BGN|DKK|kr)(?![^\W\d_])")
 _PCT = re.compile(r"[-−–]?\s*\d+(?:[.,]\d+)?\s*%")
+_INSTALMENT = re.compile(
+    rf"(?:\d+\s*(?:x\s*)?)?(?:άτοκες\s+|έντοκες\s+)?(?:δόσεις|δόση|installments?|monthly payments?|raten|rate)"
+    rf"\s*(?:των|από|της|of|à|von|da|de)?\s*(?:{_SYM})?\s?{_NUM}\s?(?:{_SYM})?(?:\s?/\s?(?:μήνα|μήνας|month|mo|monat|mese))?"
+    rf"|(?:{_SYM})?\s?{_NUM}\s?(?:{_SYM})?\s?/\s?(?:μήνα|μήνας|month|mo|monat|mese)\b", re.I)
 
 
 def parse_price(text) -> float | None:
@@ -70,6 +78,10 @@ def parse_price(text) -> float | None:
         return float(text) if text > 0 else None
     s = _SPACES.sub(" ", str(text)).strip()
     s = _PCT.sub(" ", s)
+    # «3 άτοκες δόσεις των 116,33 €», «από 29 €/μήνα»: δόση, όχι τιμή (αν μένει κι άλλη τιμή στο κείμενο)
+    rest = _INSTALMENT.sub(" ", s)
+    if rest != s and re.search(r"\d", rest):
+        s = rest
     m = re.search(rf"(?:{_SYM})\s?({_NUM})|({_NUM})\s?(?:,-)?\s?(?:{_SYM})", s, re.I)
     if m:
         num = m.group(1) or m.group(2)
@@ -141,8 +153,9 @@ def detect_currency(text, default=None) -> str | None:
 
 
 AVAIL_IN = ["instock", "in_stock", "limitedavailability", "onlineonly", "instoreonly"]
-AVAIL_OUT = ["outofstock", "out_of_stock", "soldout", "discontinued", "preorder", "presale",
-             "backorder"]
+AVAIL_OUT = ["outofstock", "out_of_stock", "soldout", "discontinued"]
+# Προπαραγγελία, κατόπιν παραγγελίας, σε αναμονή: ούτε «διαθέσιμο» ούτε «εξαντλημένο» → άγνωστο
+AVAIL_UNKNOWN = ["preorder", "presale", "backorder", "madetoorder", "reserved"]
 
 
 def availability_from_schema(value) -> bool | None:
@@ -166,7 +179,7 @@ OUT_PHRASES = [
     "dieses angebot wurde beendet", "this listing has ended", "angebot beendet",
 ]
 IN_PHRASES = [
-    "άμεσα διαθέσιμο", "διαθέσιμο", "σε απόθεμα", "παράδοση σε", "προσθήκη στο καλάθι", "στο καλάθι",
+    "άμεσα διαθέσιμο", "διαθέσιμο", "σε απόθεμα", "παράδοση σε", "προσθήκη στο καλάθι",
     "in stock", "add to cart", "auf lager", "in den einkaufswagen", "sofort lieferbar",
     "disponibilità immediata", "disponibile", "aggiungi al carrello", "en stock",
     "ajouter au panier", "añadir a la cesta", "sofort versandfertig",
@@ -202,32 +215,64 @@ PRODUCT_AREAS = ["[itemtype*='schema.org/Product']", "main .product", "#product"
                  ".product-main", ".product-page", "main"]
 
 
-def availability_from_page(soup) -> bool | None:
-    """Διαθεσιμότητα όταν δεν τη λέει η σελίδα με δομημένα δεδομένα. Ένα ενεργό κουμπί «στο καλάθι» μετράει
-    περισσότερο από λέξεις κάπου στη σελίδα (π.χ. «Εξαντλήθηκε» σε σχετικά προϊόντα)."""
-    disabled_cart = False
-    for b in soup.select("button, input[type=submit], a[class*=cart], a[class*=basket]"):
-        label = " ".join([_text(b), str(b.get("value") or ""), str(b.get("aria-label") or ""),
-                          str(b.get("title") or "")]).lower()
-        if any(w in label for w in CART_WORDS):
-            disabled = b.has_attr("disabled") or str(b.get("aria-disabled")).lower() == "true" \
-                or "disabled" in " ".join(b.get("class") or []).lower()
-            if not disabled:
-                return True
-            disabled_cart = True
+# Περιοχές της σελίδας που ΔΕΝ αφορούν το προϊόν: σχετικά προϊόντα, καρουζέλ, mini-cart, μενού
+NOT_PRODUCT = re.compile(r"(?:^|[\s_-])(?:related|similar|recommend\w*|carousel|slider|swiper|upsell|cross-?sell"
+                         r"|also-?bought|recently|minicart|mini-cart|cart-drawer|header|footer|nav|menu|sidebar)"
+                         r"(?:$|[\s_-])", re.I)
+
+
+def _outside_product(el) -> bool:
+    for a in [el] + list(el.parents):
+        if getattr(a, "name", None) in ("header", "footer", "nav", "aside"):
+            return True
+        attrs = getattr(a, "attrs", None) or {}
+        if NOT_PRODUCT.search(" ".join(attrs.get("class") or []) + " " + str(attrs.get("id") or "")):
+            return True
+    return False
+
+
+def _product_area(soup):
     for sel in PRODUCT_AREAS:
         el = soup.select_one(sel)
-        if el is None:
+        if el is not None and not _outside_product(el):
+            return el
+    return None
+
+
+def availability_from_page(soup) -> bool | None:
+    """Διαθεσιμότητα όταν δεν τη λέει η σελίδα με δομημένα δεδομένα. Ένα ενεργό κουμπί «στο καλάθι» του
+    ίδιου του προϊόντος μετράει περισσότερο από λέξεις. Κουμπιά και λέξεις σε σχετικά προϊόντα, καρουζέλ,
+    mini-cart, μενού και footer αγνοούνται."""
+    area = _product_area(soup)
+    scope = area if area is not None else soup
+    disabled_cart = enabled_cart = False
+    for b in scope.select("button, input[type=submit], a[class*=cart], a[class*=basket]"):
+        label = " ".join([_text(b), str(b.get("value") or ""), str(b.get("aria-label") or ""),
+                          str(b.get("title") or "")]).lower()
+        if not any(w in label for w in CART_WORDS) or _outside_product(b):
             continue
-        out, inn = _phrases_in(_text(el)[:8000])
-        if out and disabled_cart:  # «Εξαντλήθηκε» και ανενεργό κουμπί καλαθιού
+        disabled = b.has_attr("disabled") or str(b.get("aria-disabled")).lower() == "true" \
+            or "disabled" in " ".join(b.get("class") or []).lower()
+        if disabled:
+            disabled_cart = True
+        else:
+            enabled_cart = True
+    if area is not None:
+        out, inn = _phrases_in(_text(area)[:8000])
+        if out and disabled_cart and not enabled_cart:  # «Εξαντλήθηκε» και ανενεργό κουμπί καλαθιού
+            return False
+        if enabled_cart and not out:
+            return True
+        if out and not enabled_cart:
             return False
         if out != inn:
             return inn
-        break
+        return None if out else (True if enabled_cart else None)
+    if enabled_cart and not disabled_cart:
+        return True
     body = soup.body.get_text(" ") if soup.body else ""
     out, inn = _phrases_in(body[:20000])
-    if out != inn:  # μόνο όταν η σελίδα λέει καθαρά το ένα από τα δύο
+    if out != inn and not (inn and disabled_cart):  # μόνο όταν η σελίδα λέει καθαρά το ένα από τα δύο
         return inn
     return None
 
@@ -246,17 +291,19 @@ def _iter_jsonld(soup, deep: bool = True):
                 data = json.loads(re.sub(r"[\x00-\x1f]", " ", raw))
             except ValueError:
                 continue
-        stack = [data]
-        while stack:
-            d = stack.pop()
+        from collections import deque
+
+        todo = deque([data])  # με τη σειρά της σελίδας (η πρώτη παραλλαγή πρώτη)
+        while todo:
+            d = todo.popleft()
             if isinstance(d, list):
-                stack.extend(d)
+                todo.extend(d)
             elif isinstance(d, dict):
                 yield d
                 # Στο πρώτο πέρασμα όχι στις λίστες (σχετικά προϊόντα, breadcrumbs): μόνο το κύριο προϊόν
                 for k in ("@graph", "mainEntity", "hasVariant") + (("itemListElement",) if deep else ()):
                     if k in d:
-                        stack.append(d[k])
+                        todo.append(d[k])
 
 
 def _types(d):
@@ -272,11 +319,29 @@ def _first(v):
     return v
 
 
-def from_jsonld(soup) -> ProductInfo:
-    info = _from_jsonld(soup, deep=False)
+def from_jsonld(soup, url: str = "") -> ProductInfo:
+    info = _from_jsonld(soup, deep=False, url=url)
     if info.price is None:
-        info.merge(_from_jsonld(soup, deep=True), "jsonld")
+        info.merge(_from_jsonld(soup, deep=True, url=url), "jsonld")
     return info
+
+
+def _variant_match(d: dict, url: str) -> bool:
+    """Η παραλλαγή που δείχνει το URL (π.χ. ?sku=S, ?variant=123, /product-s)."""
+    if not url:
+        return False
+    from urllib.parse import parse_qsl, urlsplit
+
+    u = urlsplit(url)
+    own = str(d.get("url") or _first((d.get("offers") or {}).get("url") if isinstance(d.get("offers"), dict) else "")
+              or "")
+    if own:
+        o = urlsplit(own)
+        if o.path.rstrip("/") == u.path.rstrip("/") and (not o.query or o.query == u.query) and u.query:
+            return True
+    params = {v.lower() for _, v in parse_qsl(u.query) if v}
+    ids = {str(_first(d.get(k))).lower() for k in ("sku", "gtin13", "gtin", "productID", "mpn") if d.get(k)}
+    return bool(params & ids)
 
 
 def _offer_price(o: dict):
@@ -298,9 +363,12 @@ def _offer_price(o: dict):
     return price
 
 
-def _from_jsonld(soup, deep: bool) -> ProductInfo:
+def _from_jsonld(soup, deep: bool, url: str = "") -> ProductInfo:
     info = ProductInfo()
-    for d in _iter_jsonld(soup, deep):
+    docs = list(_iter_jsonld(soup, deep))
+    # Αν το URL δείχνει συγκεκριμένη παραλλαγή (μέγεθος, χρώμα…), αυτή προηγείται
+    docs.sort(key=lambda d: 0 if _variant_match(d, url) else 1)
+    for d in docs:
         if not any(t in ("product", "productgroup", "individualproduct") for t in _types(d)):
             continue
         p = ProductInfo()
@@ -450,22 +518,47 @@ GENERIC_AVAIL_SELECTORS = [
 ]
 
 
-OLD_PRICE = re.compile(r"old|was|regular|strike|before|initial|previous|compare|list-?price|rrp|msrp|crossed", re.I)
+# Παλιά / διαγραμμένη τιμή: ταιριάζουν ΟΛΟΚΛΗΡΕΣ λέξεις της κλάσης (όχι το «old» μέσα στο «font-bold»)
+OLD_TOKENS = {"old", "was", "strike", "strikethrough", "striked", "before", "initial", "previous", "compare",
+              "crossed", "rrp", "msrp", "oldprice", "wasprice", "listprice", "beforeprice", "compareprice"}
+SALE_TOKENS = {"sale", "special", "final", "current", "discounted", "offer", "promo", "new", "now", "actual"}
+BADGE_TOKENS = {"badge", "percent", "percentage", "saving", "savings", "save", "you-save"}
+
+
+def _class_tokens(el) -> set[str]:
+    cls = " ".join(el.get("class") or []).lower()
+    toks = set(re.split(r"[\s_-]+", cls)) - {""}
+    if "list-price" in cls or "list_price" in cls:
+        toks.add("listprice")
+    return toks
 
 
 def _is_old_price(el) -> bool:
-    return el.name in ("del", "s", "strike") or bool(OLD_PRICE.search(" ".join(el.get("class") or [])))
+    if el.name in ("del", "s", "strike"):
+        return True
+    toks = _class_tokens(el)
+    if toks & OLD_TOKENS:
+        return True
+    if "regular" in toks or "regularprice" in toks:
+        # Η «κανονική» τιμή είναι παλιά μόνο όταν δίπλα της υπάρχει τιμή προσφοράς (π.χ. Shopify, Magento)
+        parent = el.parent
+        if parent is not None:
+            for sib in parent.find_all(True):
+                if sib is not el and _class_tokens(sib) & SALE_TOKENS and parse_price(_text(sib)):
+                    return True
+    return False
 
 
 def _without_old_prices(el):
-    """Αντίγραφο του στοιχείου χωρίς παλιές/διαγραμμένες τιμές (<del>, .old-price…) και ποσοστά έκπτωσης."""
+    """Αντίγραφο του στοιχείου χωρίς παλιές/διαγραμμένες τιμές (<del>, .old-price…) και σήματα έκπτωσης."""
     import copy
 
     el = copy.copy(el)
     for x in list(el.find_all(True)):
         if x.decomposed:
             continue
-        if _is_old_price(x) or re.search(r"discount|badge|percent|saving", " ".join(x.get("class") or []), re.I):
+        toks = _class_tokens(x)
+        if _is_old_price(x) or toks & BADGE_TOKENS or ("discount" in toks and "%" in _text(x)):
             x.decompose()
     return el
 
@@ -520,7 +613,7 @@ def extract(html: str, url: str = "") -> ProductInfo:
                 return site
             info.merge(site, key.strip("."))
             break
-    info.merge(from_jsonld(soup), "jsonld")
+    info.merge(from_jsonld(soup, url), "jsonld")
     info.merge(from_meta(soup), "meta")
     info.merge(from_generic(soup), "generic")
     if info.price is None and _looks_like_challenge(soup, html):

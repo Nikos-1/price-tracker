@@ -24,6 +24,14 @@ RECEIPT_TYPES = {".pdf", ".jpg", ".jpeg", ".png", ".webp", ".heic", ".gif", ".bm
 MAX_RECEIPT_BYTES = 30 * 1024 * 1024
 
 
+def _fix_url(url: str) -> str:
+    """«www.shop.gr/p/1» → «https://www.shop.gr/p/1» (ο χρήστης συχνά αντιγράφει χωρίς https://)."""
+    url = (url or "").strip()
+    if url and not url.startswith(("http://", "https://")) and re.match(r"^[\w.-]+\.[a-z]{2,}(/|$)", url, re.I):
+        url = "https://" + url
+    return url
+
+
 def _num(v):
     if v in (None, ""):
         return None
@@ -35,6 +43,24 @@ def _num(v):
 
 
 SETTINGS_FILE = "Ρυθμίσεις.json"
+def explain_email_error(msg: str) -> str:
+    """Τα συνηθισμένα σφάλματα SMTP σε απλά ελληνικά (το αρχικό μένει σε παρένθεση για βοήθεια)."""
+    low = (msg or "").lower()
+    if "535" in low or "username and password not accepted" in low or "authentication" in low:
+        nice = ("Ο κωδικός εφαρμογής (App Password) δεν έγινε δεκτός. Φτιάξε νέο στον λογαριασμό Google "
+                "και γράψε τον στις Ρυθμίσεις.")
+    elif "534" in low or "application-specific password" in low:
+        nice = "Ο λογαριασμός θέλει κωδικό εφαρμογής (App Password), όχι τον κανονικό κωδικό."
+    elif "timed out" in low or "timeout" in low or "getaddrinfo" in low or "network" in low or "10060" in low:
+        nice = "Δεν υπήρχε σύνδεση με τον server email (ίντερνετ;). Θα ξαναδοκιμάσει μόνο του."
+    elif "λείπουν στοιχεία" in low or "άλλαξε ο smtp" in low:
+        return msg
+    else:
+        return msg
+    return f"{nice} ({msg[:120]})"
+
+
+SIDE_EFFECT_GETS = {"/api/settings/export", "/api/export.xlsx"}
 LOCAL_HOSTS = {"127.0.0.1", "localhost"}
 
 
@@ -47,7 +73,8 @@ SERVABLE_EXT = {".jpg", ".jpeg", ".png", ".webp"}
 SERVABLE_DIRS = {productdirs.PRODUCTS_DIR, productdirs.OLD_SHOTS_DIR}
 
 
-def create_app(db, worker, data_dir: Path, shell=None, updater=None, exports_dir: Path | None = None):
+def create_app(db, worker, data_dir: Path, shell=None, updater=None, exports_dir: Path | None = None,
+               instance: str = ""):
     """shell: αντικείμενο με hide()/quit()/show() για το παράθυρο (desktop)."""
     app = Flask(__name__, static_folder=None)
     app.config["MAX_CONTENT_LENGTH"] = MAX_RECEIPT_BYTES + 1024 * 1024
@@ -69,6 +96,10 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None, exports_dir
         if _hostname(request.host) not in LOCAL_HOSTS:
             return err("Μη επιτρεπτό αίτημα", 403)
         if request.method in ("GET", "HEAD", "OPTIONS"):
+            # Λήψεις που γράφουν αρχεία: μόνο από το δικό μας παράθυρο, όχι από σύνδεσμο/εικόνα ξένης σελίδας
+            if request.path in SIDE_EFFECT_GETS and request.headers.get("Sec-Fetch-Site") not in (None, "same-origin",
+                                                                                                 "none"):
+                return err("Μη επιτρεπτό αίτημα", 403)
             return None
         origin = request.headers.get("Origin")
         if origin is not None and _hostname(urlsplit(origin).netloc) not in LOCAL_HOSTS:
@@ -211,29 +242,33 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None, exports_dir
         s["health"] = health_issues(settings, s["update"])
         return jsonify(s)
 
-    def health_issues(settings, upd) -> list[str]:
-        """«Υγεία»: προβλήματα που αλλιώς θα περνούσαν απαρατήρητα, με απλά λόγια."""
+    def health_issues(settings, upd) -> list[dict]:
+        """«Υγεία»: προβλήματα που αλλιώς θα περνούσαν απαρατήρητα, με απλά λόγια και, όπου γίνεται, κουμπί
+        «Διόρθωση» (fix="settings")."""
         h = getattr(worker, "health", None) or {}
         out = []
+        for t in h.get("db_problems") or []:
+            out.append({"text": t})
         ts = h.get("scheduler_ts")
         if ts and time.time() - ts > 300:
-            out.append("Οι αυτόματοι έλεγχοι έχουν σταματήσει. Κλείσε και ξανάνοιξε την εφαρμογή.")
+            out.append({"text": "Οι αυτόματοι έλεγχοι έχουν σταματήσει. Κλείσε και ξανάνοιξε την εφαρμογή."})
         if settings.get("email_enabled") and h.get("email_error"):
-            out.append(f"Το email απέτυχε ({h.get('email_error_at')}): {h['email_error']}")
+            out.append({"text": f"Το email απέτυχε ({h.get('email_error_at')}): {explain_email_error(h['email_error'])}",
+                        "fix": "settings"})
         box = settings.get("email_outbox") or []
         if settings.get("email_enabled") and box:
-            out.append(f"{len(box)} email περιμένουν να σταλούν (νέα προσπάθεια κάθε 15 λεπτά).")
+            out.append({"text": f"{len(box)} email περιμένουν να σταλούν (νέα προσπάθεια κάθε 15 λεπτά)."})
         if h.get("backup_error"):
-            out.append(f"Δεν έγινε το αντίγραφο της βάσης στα Έγγραφα: {h['backup_error']}")
+            out.append({"text": f"Δεν έγινε το αντίγραφο της βάσης στα Έγγραφα: {h['backup_error']}"})
         if (upd or {}).get("state") == "error" and (upd or {}).get("message"):
-            out.append(f"Ενημέρωση: {upd['message']}")
+            out.append({"text": f"Ενημέρωση: {upd['message']}", "fix": "settings"})
         try:
             stale = db.stale_products(24)
         except Exception:  # noqa: BLE001
             stale = []
         if stale:
             names = ", ".join(stale[:3]) + (f" και {len(stale) - 3} ακόμα" if len(stale) > 3 else "")
-            out.append(f"Δεν ελέγχθηκαν με επιτυχία πάνω από 24 ώρες: {names}")
+            out.append({"text": f"Δεν ελέγχθηκαν με επιτυχία πάνω από 24 ώρες: {names}"})
         return out
 
     @app.post("/api/check")
@@ -307,7 +342,7 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None, exports_dir
     @app.post("/api/products")
     def create_product():
         b = request.get_json() or {}
-        url = (b.get("url") or "").strip()
+        url = _fix_url(b.get("url"))
         if not url.startswith(("http://", "https://")):
             return err("Επικόλλησε ένα έγκυρο link προϊόντος (ξεκινά με https://)")
         cat = _cat(b.get("category_id"))
@@ -416,6 +451,18 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None, exports_dir
     def accept_listing(lid):
         db.set_listing_status(lid, "active")
         worker.enqueue("check_listing", listing_id=lid)
+        return jsonify({"ok": True})
+
+    @app.post("/api/listings/<int:lid>/undo")
+    def undo_listing(lid):
+        """Αναίρεση μιας επιβεβαίωσης/απόρριψης: η πρόταση γίνεται ξανά «πιθανή αντιστοιχία»."""
+        l = db.get_listing(lid)
+        if not l or l.get("status") not in ("active", "rejected"):
+            return err("Δεν μπορεί να αναιρεθεί")
+        shots = db.listing_screenshots([lid])
+        db.clear_history(lid)
+        db.set_listing_status(lid, "candidate")
+        remove_files(shots)
         return jsonify({"ok": True})
 
     @app.post("/api/listings/<int:lid>/reject")
@@ -927,6 +974,10 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None, exports_dir
             elif choice == "tray":
                 shell.hide()
         return jsonify({"ok": True})
+
+    @app.get("/api/instance")
+    def get_instance():
+        return jsonify({"id": instance})
 
     @app.post("/api/window/show")
     def show_window():

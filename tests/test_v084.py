@@ -229,7 +229,8 @@ def test_blocked_403_and_captcha_given_up_once_per_cycle(tmp_path, monkeypatch):
     monkeypatch.setattr(w, "_browser", lambda: Br())
     monkeypatch.setattr(w, "_ask_user_to_unblock", lambda br, url, reason: asked.append(url) or None)
     w.check_listings(db.list_listings(product_id=pid), "Έλεγχος")
-    assert asked == ["https://www.idealo.de/p/1"]  # ρωτά μία φορά, το δεύτερο του ίδιου καταστήματος παραλείπεται
+    # v0.8.5: ένα σκέτο 403 (χωρίς captcha) δεν ανοίγει παράθυρο· το δεύτερο του ίδιου καταστήματος παραλείπεται
+    assert asked == []
     assert "μπλόκαρε" in db.get_listing(l1)["last_error"] and "παραλείφθηκε" in db.get_listing(l2)["last_error"]
 
 
@@ -281,5 +282,5 @@ def test_status_shows_health_issues(tmp_path):
     w.health = {"scheduler_ts": time.time() - 3600, "email_error": "535 auth", "email_error_at": "10/11 09:00"}
     db.set_settings({"email_enabled": True})
     c = create_app(db, w, tmp_path).test_client()
-    h = c.get("/api/status").get_json()["health"]
-    assert any("σταματήσει" in x for x in h) and any("535" in x for x in h)
+    h = [x["text"] for x in c.get("/api/status").get_json()["health"]]  # από v0.8.5: {text, fix}
+    assert any("σταματήσει" in x for x in h) and any("535" in x and "κωδικός εφαρμογής" in x for x in h)

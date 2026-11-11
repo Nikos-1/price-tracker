@@ -105,7 +105,7 @@ MIGRATIONS = {
     "categories": [("sector_id", "INTEGER REFERENCES sectors(id) ON DELETE SET NULL")],
     "shops": [("country", "TEXT")],
     "listings": [("last_price_eur", "REAL"), ("currency_override", "TEXT"), ("currency_asked", "INTEGER")],
-    "price_history": [("price_eur", "REAL")],
+    "price_history": [("price_eur", "REAL"), ("source", "TEXT")],
 }
 
 DEFAULT_SETTINGS = {
@@ -608,6 +608,12 @@ class Database:
         with self.conn() as c:
             c.execute("UPDATE listings SET currency_asked=1 WHERE id=?", (listing_id,))
 
+    def clear_history(self, listing_id: int):
+        with self.conn() as c:
+            c.execute("DELETE FROM price_history WHERE listing_id=?", (listing_id,))
+            c.execute("UPDATE listings SET last_price=NULL, last_currency=NULL, last_in_stock=NULL, last_checked=NULL,"
+                      " last_error=NULL, last_screenshot=NULL, last_price_eur=NULL WHERE id=?", (listing_id,))
+
     def set_listing_status(self, listing_id: int, status: str):
         with self.conn() as c:
             c.execute("UPDATE listings SET status=? WHERE id=?", (status, listing_id))
@@ -617,16 +623,16 @@ class Database:
             c.execute("DELETE FROM listings WHERE id=?", (listing_id,))
 
     def record_check(self, listing_id, price, currency, in_stock, title=None, screenshot=None, error=None,
-                     price_eur=None):
+                     price_eur=None, source=None):
         ts = now_iso()
         if price_eur is None and price is not None and (currency or "").upper() == "EUR":
             price_eur = price
         with self.conn() as c:
             c.execute(
                 "INSERT INTO price_history(listing_id, checked_at, price, currency, in_stock, screenshot, error,"
-                " price_eur) VALUES(?,?,?,?,?,?,?,?)",
+                " price_eur, source) VALUES(?,?,?,?,?,?,?,?,?)",
                 (listing_id, ts, price, currency, None if in_stock is None else int(in_stock), screenshot, error,
-                 price_eur),
+                 price_eur, source),
             )
             if error:
                 c.execute("UPDATE listings SET last_checked=?, last_error=? WHERE id=?", (ts, error, listing_id))

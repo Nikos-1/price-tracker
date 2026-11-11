@@ -222,12 +222,56 @@ def search_url_candidates(html: str, page_url: str) -> list[str]:
         forms.append((0 if "search" in role else 1, tmpl))
     for _, t in sorted(forms, key=lambda x: x[0]):
         add(t)
-    # 3. Συνηθισμένα μοτίβα
     parts = urlparse(page_url)
     base = f"{parts.scheme}://{parts.netloc}"
-    for p in COMMON_SEARCH_PATHS:
+    # 3. Αναζήτηση που γίνεται με JavaScript (κουτί χωρίς <form>): π.χ. location = "/search.php?searchfor=" + q
+    for m in re.finditer(r"""["'](/?[\w/.\-]*\?(?:[\w\-]+=[^"'&]*&)*(\w+)=)["']\s*\+""", html or ""):
+        path, param = m.group(1), m.group(2)
+        if param in SEARCH_PARAM_NAMES or "search" in param.lower() or "search" in path.lower():
+            add(urljoin(base + "/", path) + "{q}")
+    # 4. Συνηθισμένα μοτίβα, πρώτα αυτά της πλατφόρμας που «φαίνεται» στην αρχική σελίδα
+    for p in sorted(COMMON_SEARCH_PATHS, key=lambda p: _platform_rank(p, html or "")):
         add(base + p)
     return out
+
+
+# Αποτυπώματα πλατφόρμας στην αρχική σελίδα → ποια μοτίβα αναζήτησης να δοκιμαστούν πρώτα
+PLATFORM_HINTS = [
+    (("search.php", "thpicvx", "komvos"), ("/search.php",)),
+    (("woocommerce", "wp-content"), ("/?s=",)),
+    (("mage/", "magento", "catalogsearch"), ("/catalogsearch/",)),
+    (("route=product", "catalog/view/theme", "opencart"), ("route=product/search",)),
+    (("prestashop",), ("controller=search",)),
+    (("cdn.shopify.com", "shopify"), ("/search?q=",)),
+]
+
+
+def _platform_rank(path: str, html: str) -> int:
+    low = html[:400000].lower()
+    for marks, paths in PLATFORM_HINTS:
+        if any(m in low for m in marks) and any(x in path for x in paths):
+            return 0
+    return 1
+
+
+_STOP = {"https", "http", "www", "home", "shop", "menu", "cart", "login", "contact", "about", "search", "more",
+         "products", "product", "προϊόντα", "καλάθι", "αναζήτηση", "επικοινωνία", "σύνδεση", "προσφορές", "όλα",
+         "νέα", "περισσότερα", "κατηγορίες", "λογαριασμός", "facebook", "instagram", "youtube", "twitter"}
+
+
+def probe_words(html: str, n: int = 2) -> list[str]:
+    """Λέξεις δοκιμής για την αναζήτηση, από την ίδια την αρχική σελίδα (π.χ. μάρκες που πουλά το
+    κατάστημα): ένα κατάστημα εργαλείων κήπου δεν έχει «samsung» στα αποτελέσματα."""
+    from collections import Counter
+
+    soup = BeautifulSoup(html or "", "html.parser")
+    cnt: Counter = Counter()
+    for a in soup.find_all("a"):
+        for w in re.findall(r"[^\W\d_]{4,}", a.get_text(" ")):
+            lw = w.lower()
+            if lw not in _STOP:
+                cnt[lw] += 1
+    return [w for w, c in cnt.most_common(n) if c >= 2]
 
 
 def looks_like_search_results(html: str, final_url: str, word: str, home_url: str) -> bool:
@@ -237,7 +281,9 @@ def looks_like_search_results(html: str, final_url: str, word: str, home_url: st
     if final_url.rstrip("/") == home_url.rstrip("/"):
         return False
     low = html.lower()
-    if low.count(word.lower()) < 2:
+    w = word.lower()
+    # Η λέξη να υπάρχει στα αποτελέσματα, όχι μόνο στο «Αναζήτηση για …» (ή να φαίνεται και στη διεύθυνση)
+    if low.count(w) < 2 and not (low.count(w) >= 1 and w in final_url.lower() and low.count("<a ") >= 20):
         return False
     nf = ("404", "page not found", "δεν βρέθηκε η σελίδα", "seite nicht gefunden")
     title = (BeautifulSoup(html, "html.parser").title or "")

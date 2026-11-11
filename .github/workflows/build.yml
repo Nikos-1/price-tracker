@@ -37,6 +37,26 @@ jobs:
           if (-not $r.black_friday) { throw "status failed" }
           Invoke-RestMethod http://127.0.0.1:48399/api/categories | Out-Null
           Stop-Process -Id $p.Id -Force
+      - name: Smoke test (real folders, database moves from Documents to AppData)
+        shell: pwsh
+        run: |
+          # Όπως σε υπολογιστή που αναβαθμίζει από v0.8.3: η βάση είναι στα Έγγραφα\PriceTracker
+          $docs = Join-Path ([Environment]::GetFolderPath("MyDocuments")) "PriceTracker"
+          New-Item -ItemType Directory -Force $docs | Out-Null
+          python -c "import sys; from pricetracker.db import Database; Database(sys.argv[1]).create_product('SmokeTest')" "$docs\pricetracker.db"
+          $env:PRICETRACKER_PORT = "48398"
+          $p = Start-Process python -ArgumentList "-m","pricetracker","--browser","--tray","--no-check" -PassThru
+          Start-Sleep -Seconds 10
+          $r = Invoke-RestMethod http://127.0.0.1:48398/api/products
+          if (-not ($r | Where-Object { $_.name -eq "SmokeTest" })) { throw "the product did not survive the move" }
+          $s = Invoke-RestMethod http://127.0.0.1:48398/api/status
+          if ($s.health.Count -gt 0) { throw ("health: " + ($s.health | ConvertTo-Json)) }
+          # Δεύτερη εκκίνηση: βρίσκει την πρώτη, δεν ανοίγει δεύτερη εφαρμογή
+          $p2 = Start-Process python -ArgumentList "-m","pricetracker","--browser","--tray","--no-check" -PassThru
+          if (-not $p2.WaitForExit(20000)) { throw "second instance did not exit" }
+          Stop-Process -Id $p.Id -Force
+          if (-not (Test-Path "$env:LOCALAPPDATA\PriceTracker\pricetracker.db")) { throw "live db not in AppData" }
+          if (Test-Path "$docs\pricetracker.db") { throw "live db still in Documents" }
       - name: Build exe
         run: pyinstaller PriceTracker.spec --noconfirm
       - name: Version

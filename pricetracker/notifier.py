@@ -49,12 +49,20 @@ def save_password(db, user: str, password: str):
     return "keyring"
 
 
-def load_password(db, user: str) -> str:
+def host_changed(db) -> bool:
+    """True αν ο κωδικός αποθηκεύτηκε για άλλον SMTP server από αυτόν που είναι τώρα στις ρυθμίσεις."""
+    bound = db.get_settings().get("smtp_password_host")
+    return bound is not None and bound != _host(db)
+
+
+def load_password(db, user: str, migrate: bool = True) -> str:
+    """Ο κωδικός από το Credential Manager. Με migrate=False δεν γράφει τίποτα (για απλή ανάγνωση)."""
     settings = db.get_settings()
     bound = settings.get("smtp_password_host")
     host = _host(db)
     if bound is None:  # από παλιότερη έκδοση: δένεται με τον server που υπάρχει τώρα
-        db.set_settings({"smtp_password_host": host})
+        if migrate:
+            db.set_settings({"smtp_password_host": host})
     elif bound != host:
         log.warning("SMTP server changed since the password was saved; not sending the password")
         return ""
@@ -65,7 +73,7 @@ def load_password(db, user: str) -> str:
             pw = kr.get_password(KEYRING_SERVICE, user)
             if pw:
                 return pw
-            if plain:  # παλιός κωδικός σε απλό κείμενο: μεταφορά στο Credential Manager
+            if plain and migrate:  # παλιός κωδικός σε απλό κείμενο: μεταφορά στο Credential Manager
                 kr.set_password(KEYRING_SERVICE, user, plain)
                 db.set_settings({"smtp_password_plain": ""})
                 return plain
@@ -75,7 +83,7 @@ def load_password(db, user: str) -> str:
 
 
 def has_password(db, user: str) -> bool:
-    return bool(user and load_password(db, user))
+    return bool(user and load_password(db, user, migrate=False))
 
 
 def send_email(settings: dict, password: str, subject: str, text: str, html_body: str | None = None,

@@ -25,6 +25,31 @@ COOKIE_BUTTON_TEXTS = [
     "Aceptar todo", "Aceptar", "OK",
 ]
 
+COOKIE_JS = """
+([selectors, texts]) => {
+  const visible = (e) => { const r = e.getBoundingClientRect(); const st = getComputedStyle(e);
+    return r.width > 0 && r.height > 0 && st.visibility !== 'hidden' && st.display !== 'none'; };
+  for (const sel of selectors) {
+    try { const e = document.querySelector(sel); if (e && visible(e)) { e.click(); return true; } } catch (_) {}
+  }
+  const banner = /cookie|consent|gdpr|cmp|privacy|onetrust|didomi|usercentrics|cookiebot/i;
+  const inBanner = (e) => { for (let a = e; a && a !== document.body; a = a.parentElement) {
+      if (banner.test((a.id || '') + ' ' + (typeof a.className === 'string' ? a.className : '')
+                      + ' ' + (a.getAttribute('aria-label') || ''))) return true; } return false; };
+  const generic = new Set(['OK', 'Accept', 'Αποδοχή', 'Συμφωνώ', 'Accetta', 'Accepter', 'Aceptar', 'Akzeptieren']);
+  const buttons = Array.from(document.querySelectorAll('button, [role=button], a.button, input[type=button], input[type=submit]'));
+  for (const t of texts) {
+    for (const b of buttons) {
+      const label = (b.innerText || b.value || '').trim();
+      if (label !== t || !visible(b)) continue;
+      if (generic.has(t) && !inBanner(b)) continue;
+      b.click(); return true;
+    }
+  }
+  return false;
+}
+"""
+
 OVERLAY_JS = """
 ([shop, title, price, when]) => {
   const old = document.getElementById('__pt_overlay'); if (old) old.remove();
@@ -56,6 +81,10 @@ class Browser:
     """Ένας browser για όλους τους ελέγχους ενός κύκλου. Χρησιμοποιείται μόνο από ένα thread."""
 
     _ua_cache: dict[str, str] = {}
+    # Κοινό για όλους τους browsers της εφαρμογής: η απόσταση ανάμεσα σε δύο σελίδες του ίδιου καταστήματος
+    # ισχύει και από εργασία σε εργασία (π.χ. έλεγχος και αμέσως μετά αναζήτηση)
+    _last_host_time: dict[str, float] = {}
+    BLOCK_TYPES = {"font", "media"}  # οι εικόνες μένουν: το screenshot βγαίνει από την ίδια σελίδα
 
     def __init__(self, headless: bool = True, profile_dir: Path | None = None):
         self.headless = headless
@@ -63,7 +92,6 @@ class Browser:
         self._pw = None
         self._context = None
         self._launch_opts = None
-        self._last_host_time: dict[str, float] = {}
 
     def __enter__(self):
         self.start()
@@ -126,6 +154,20 @@ class Browser:
             self._pw = None
             raise RuntimeError("Δεν βρέθηκε browser (Edge/Chrome). " + " | ".join(errors))
         self._context.add_init_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
+        try:  # λιγότερα δεδομένα και γρηγορότεροι έλεγχοι: χωρίς γραμματοσειρές και βίντεο
+            self._context.route("**/*", self._route)
+        except Exception:  # noqa: BLE001
+            log.debug("route failed", exc_info=True)
+
+    @classmethod
+    def _route(cls, route):
+        try:
+            if route.request.resource_type in cls.BLOCK_TYPES:
+                route.abort()
+            else:
+                route.continue_()
+        except Exception:  # noqa: BLE001
+            pass
 
     def _close_context(self):
         ctx, self._context = self._context, None
@@ -185,24 +227,14 @@ class Browser:
         self._last_host_time[host] = time.time()
 
     def _accept_cookies(self, page):
-        for sel in COOKIE_BUTTON_SELECTORS:
-            try:
-                loc = page.locator(sel).first
-                if loc.is_visible(timeout=300):
-                    loc.click(timeout=1500)
-                    page.wait_for_timeout(500)
-                    return
-            except Exception:  # noqa: BLE001
-                continue
-        for txt in COOKIE_BUTTON_TEXTS:
-            try:
-                loc = page.get_by_role("button", name=txt, exact=True).first
-                if loc.is_visible(timeout=200):
-                    loc.click(timeout=1500)
-                    page.wait_for_timeout(500)
-                    return
-            except Exception:  # noqa: BLE001
-                continue
+        """Πατά «Αποδοχή» σε banner cookies, με έναν μόνο έλεγχο στη σελίδα (όχι 26 αναμονές). Τα γενικά
+        κουμπιά («OK», «Accept») μετράνε μόνο μέσα σε κάτι που μοιάζει με banner cookies."""
+        try:
+            clicked = page.evaluate(COOKIE_JS, [COOKIE_BUTTON_SELECTORS, COOKIE_BUTTON_TEXTS])
+        except Exception:  # noqa: BLE001
+            return
+        if clicked:
+            page.wait_for_timeout(500)
 
     def open(self, url: str, timeout_ms: int = 45000):
         """Ανοίγει τη σελίδα και επιστρέφει (page, PageResult). Ο καλών κλείνει τη σελίδα."""
@@ -217,11 +249,11 @@ class Browser:
                 pass
             raise
         try:
-            page.wait_for_load_state("networkidle", timeout=8000)
+            page.wait_for_load_state("networkidle", timeout=4000)
         except Exception:  # noqa: BLE001
             pass
         self._accept_cookies(page)
-        page.wait_for_timeout(800)
+        page.wait_for_timeout(600)
         res = PageResult(url=url, final_url=page.url, html=page.content(),
                          status=resp.status if resp else None)
         return page, res
