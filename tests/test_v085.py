@@ -414,3 +414,57 @@ def test_every_fetch_goes_through_api_helpers():
     js = (Path(__file__).resolve().parent.parent / "pricetracker" / "static" / "app.js").read_text(encoding="utf-8")
     # Κάθε fetch περνά από api()/apiForm(), που στέλνουν την κεφαλίδα X-PriceTracker
     assert js.count("fetch(") == js.count('"X-PriceTracker": "1"')
+
+
+# ---------------------------------------------------------------- screenshot μόνο με διαθεσιμότητα (Nick, 11/11)
+def test_screenshot_only_when_available_and_replaces_unavailable_one(tmp_path, monkeypatch):
+    db = Database(tmp_path / "db.sqlite")
+    pid = db.create_product("Ψυγείο")
+    lid = db.add_listing(pid, "https://www.plaisio.gr/p/1")
+    w = Worker(db, tmp_path)
+    # Παλιότερη καταχώριση: screenshot από τότε που ήταν εξαντλημένο
+    old = tmp_path / "Προϊόντα" / "old.jpg"
+    old.parent.mkdir(parents=True)
+    old.write_bytes(b"jpg")
+    db.record_check(lid, 300.0, "EUR", False, screenshot="Προϊόντα/old.jpg")
+    readings = iter([(300.0, False), (300.0, False), (300.0, True), (300.0, True), (300.0, False), (300.0, True)])
+    shots = []
+
+    class Info:
+        blocked = None
+        currency = "EUR"
+        title = "Ψυγείο"
+        ean = mpn = brand = image = None
+        price_source = "jsonld"
+
+    class Res:
+        html, final_url, status = "", "https://www.plaisio.gr/p/1", 200
+
+    class Br:
+        def open(self, url):
+            return self, Res()
+
+        def close(self):
+            pass
+
+        def screenshot(self, page, path, *a):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"jpg")
+            shots.append(path)
+
+    def fake_extract(html, url):
+        i = Info()
+        i.price, i.in_stock = next(readings)
+        return i
+
+    monkeypatch.setattr("pricetracker.worker.extract", fake_extract)
+    settings = db.get_settings()
+    counts = []
+    for _ in range(6):
+        l = db.list_listings(product_id=pid, status=None)[0]
+        w._check_one(Br(), l, db.get_product(pid), settings)
+        counts.append(len(shots))
+    # εξαντλημένο → κανένα· γίνεται διαθέσιμο → ένα· μένει διαθέσιμο → κανένα· εξαντλείται → κανένα· ξανά → ένα
+    assert counts == [0, 0, 1, 1, 1, 2]
+    assert not old.exists() and "Προϊόντα/old.jpg" not in db.product_screenshots(pid)
+    assert db.get_listing(lid)["last_screenshot"] and db.get_listing(lid)["last_screenshot"] != "Προϊόντα/old.jpg"

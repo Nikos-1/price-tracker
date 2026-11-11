@@ -381,13 +381,20 @@ class Worker:
             if info.price is not None and not info.currency:
                 self._ask_currency(l, product)
             shot = None
-            # Screenshot: την πρώτη φορά (η μέρα που προστέθηκε) και μετά μόνο όταν πέφτει η τιμή.
-            # Όλα μένουν στον φάκελο του προϊόντος, Προϊόντα\<ημερομηνία προσθήκης> <όνομα>.
-            last = next((h for h in reversed(prev_ok) if h["price"] is not None), None)
+            # Screenshot ΜΟΝΟ όταν το προϊόν είναι διαθέσιμο σε αυτό το κατάστημα: την πρώτη φορά που βρέθηκε
+            # διαθέσιμο, όταν ξαναγίνει διαθέσιμο, και όταν πέφτει η τιμή. Όσο είναι εξαντλημένο, το κατάστημα
+            # μένει στη λίστα χωρίς screenshot. Όλα στον φάκελο Προϊόντα\<ημερομηνία προσθήκης> <όνομα>.
+            avail = [h for h in prev_ok if h["price"] is not None and h["in_stock"]]
+            last = avail[-1] if avail else None
             dropped = (last is not None and info.price is not None
                        and (last.get("currency") or "") == (info.currency or last.get("currency") or "")
                        and info.price < last["price"])
-            if info.price is not None and (last is None or dropped or settings.get("screenshot_mode") == "always"):
+            prev_stock = next((h for h in reversed(prev_ok) if h["in_stock"] is not None), None)
+            became_available = prev_stock is not None and not prev_stock["in_stock"]
+            had_shot = any(h.get("screenshot") and h["in_stock"] for h in prev_hist)
+            available_now = info.price is not None and in_stock
+            if available_now and (not had_shot or became_available or dropped
+                                  or settings.get("screenshot_mode") == "always"):
                 when = datetime.now().strftime("%d/%m/%Y %H:%M")
                 path = (productdirs.product_dir(self.db, self.data_dir, product) /
                         f"{datetime.now():%Y%m%d_%H%M%S}_{_slug(l.get('shop_name') or 'shop', 20)}.jpg")
@@ -420,6 +427,10 @@ class Worker:
             if shot:  # η σελίδα/το προϊόν διαγράφηκε στο μεταξύ: να μη μείνει ορφανό screenshot
                 productdirs.remove_tree(self.data_dir / shot)
             raise
+        if shot:
+            # Το νέο screenshot (με διαθεσιμότητα) αντικαθιστά όσα τραβήχτηκαν όταν το προϊόν δεν ήταν διαθέσιμο
+            for old in self.db.clear_unavailable_screenshots(l["id"], keep=shot):
+                productdirs.remove_tree(self.data_dir / old)
         # Συμπλήρωση στοιχείων προϊόντος αν λείπουν
         upd = {}
         for k_info, k_prod in (("ean", "ean"), ("mpn", "mpn"), ("brand", "brand"), ("image", "image_url")):
