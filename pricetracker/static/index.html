@@ -11,8 +11,8 @@
 <body>
 <header class="topbar">
   <div class="brand">🏷️ Price Tracker</div>
-  <div id="status" class="status">…</div>
-  <div id="health" class="health hidden"></div>
+  <div id="status" class="status" role="status" aria-live="polite">…</div>
+  <div id="health" class="health hidden" role="alert"></div>
   <div class="actions">
     <button class="primary" id="btn-add">+ Προσθήκη προϊόντος</button>
     <button id="btn-check">⟳ Έλεγχος τώρα</button>
@@ -36,7 +36,7 @@
   <main id="main"></main>
 </div>
 <div id="modal-root"></div>
-<div id="toast" class="toast hidden"></div>
+<div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
 <script src="/static/app.js"></script>
 </body>
 </html>

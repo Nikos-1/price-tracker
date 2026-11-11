@@ -274,14 +274,54 @@ def acquire_instance_lock(app_dir: Path) -> bool:
     return True
 
 
-def already_running() -> bool:
+def instance_id(app_dir: Path) -> str:
+    """Ταυτότητα της εκτέλεσης: ίδια μόνο για τον ίδιο χρήστη Windows (ίδιο φάκελο εφαρμογής)."""
+    import hashlib
+
+    return hashlib.sha256(str(Path(app_dir).resolve()).lower().encode("utf-8")).hexdigest()[:16]
+
+
+def _probe(port: int) -> str | None:
+    """None = η θύρα είναι ελεύθερη· αλλιώς η ταυτότητα της εφαρμογής που ακούει εκεί ("" αν άγνωστη)."""
+    import json
+    import socket
+
+    with socket.socket() as sock:
+        sock.settimeout(1)
+        if sock.connect_ex(("127.0.0.1", port)) != 0:
+            return None
     try:
-        req = urllib.request.Request(f"http://127.0.0.1:{PORT}/api/window/show", data=b"{}", method="POST",
-                                     headers={"Content-Type": "application/json", "X-PriceTracker": "1"})
-        urllib.request.urlopen(req, timeout=2)
-        return True
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/instance", timeout=2) as r:
+            return str(json.loads(r.read().decode("utf-8")).get("id") or "")
     except Exception:  # noqa: BLE001
-        return False
+        return ""
+
+
+def choose_port(app_dir: Path) -> int:
+    """Η πρώτη ελεύθερη θύρα από την προεπιλεγμένη και μετά. Σε κοινό υπολογιστή, ο δεύτερος χρήστης Windows
+    παίρνει την επόμενη θύρα αντί να «βρει» την εφαρμογή του πρώτου και να κλείσει."""
+    for port in range(PORT, PORT + 20):
+        if _probe(port) is None:
+            return port
+    return PORT
+
+
+def already_running(app_dir: Path | None = None) -> bool:
+    """Εμφανίζει το παράθυρο της εκτέλεσης που τρέχει ήδη για τον ίδιο χρήστη."""
+    ports = [PORT]
+    if app_dir is not None:
+        me = instance_id(app_dir)
+        ours = [p for p in range(PORT, PORT + 20) if _probe(p) == me]
+        ports = ours or [PORT]  # παλιότερη έκδοση χωρίς /api/instance: η προεπιλεγμένη θύρα
+    for port in ports:
+        try:
+            req = urllib.request.Request(f"http://127.0.0.1:{port}/api/window/show", data=b"{}", method="POST",
+                                         headers={"Content-Type": "application/json", "X-PriceTracker": "1"})
+            urllib.request.urlopen(req, timeout=2)
+            return True
+        except Exception:  # noqa: BLE001
+            continue
+    return False
 
 
 def start_server(app):
@@ -322,14 +362,14 @@ def main(argv=None):
     ap.add_argument("--data", help="Φάκελος δεδομένων")
     args = ap.parse_args(argv)
 
-    if already_running():
-        return 0
+    global PORT
     data_dir = Path(args.data) if args.data else default_data_dir()
     app_dir = data_dir if args.data else default_app_dir(data_dir)
     data_dir.mkdir(parents=True, exist_ok=True)
     if not acquire_instance_lock(app_dir):
-        already_running()  # εμφανίζει το παράθυρο της εκτέλεσης που τρέχει ήδη
+        already_running(app_dir)  # εμφανίζει το παράθυρο της εκτέλεσης που τρέχει ήδη
         return 0
+    PORT = choose_port(app_dir)
     exports_dir = data_dir / "exports" if args.data else default_exports_dir(data_dir)
     moved = move_internal_files(data_dir, app_dir, exports_dir)
     setup_logging(app_dir)
@@ -350,11 +390,13 @@ def main(argv=None):
     db.set_settings({"app_version": __version__})
     shell = Shell(db)
     worker = Worker(db, data_dir, notify_callback=shell.notify, app_dir=app_dir)
+    worker.health["db_problems"] = dbfile.problems(db_events)
     worker.backup = lambda force=False: dbfile.backup_if_due(db_path, data_dir, force=force)
     shell.hidden = args.tray
     updater = Updater(db, app_dir, worker=worker, notify=shell.notify, request_quit=lambda: shell.quit(),
                       is_hidden=lambda: shell.hidden)
-    app = create_app(db, worker, data_dir, shell=shell, updater=updater, exports_dir=exports_dir)
+    app = create_app(db, worker, data_dir, shell=shell, updater=updater, exports_dir=exports_dir,
+                     instance=instance_id(app_dir))
     srv = start_server(app)
     url = f"http://127.0.0.1:{PORT}/"
     log.info("Price Tracker ξεκίνησε, δεδομένα στο %s", data_dir)

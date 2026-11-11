@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import queue
+import random
 import re
 import threading
 import time
@@ -12,7 +13,7 @@ from pathlib import Path
 from . import analysis, fx, notifier, productdirs
 from .browser import Browser
 from .extract import extract
-from .search import (build_query, find_candidates, looks_like_search_results, search_url,
+from .search import (build_query, find_candidates, looks_like_search_results, probe_words, search_url,
                      search_url_candidates)
 from .shops import DEFAULT_SHOPS, REGION_LABELS, country_label, currency_of_country, host_of
 
@@ -23,6 +24,8 @@ BLOCK_STATUS = {403, 429, 503}
 NET_ERROR = re.compile(r"net::ERR_|ERR_NAME_NOT_RESOLVED|ERR_INTERNET_DISCONNECTED|getaddrinfo|Timeout \d+ms exceeded"
                        r"|timed out|Network is unreachable|ConnectionRefused", re.I)
 ALERT_COOLDOWN_H = 24
+BLOCK_PAUSE_S = 3600          # κατάστημα που απάντησε 403/429/503: ξεκούραση 1 ώρα
+CAPTCHA_PAUSE_S = 3 * 3600    # captcha που δεν λύθηκε: 3 ώρες χωρίς ερωτήσεις (ούτε παράθυρα τη νύχτα)
 OUTBOX_MAX_AGE_H = 48
 
 
@@ -37,6 +40,36 @@ def _slug(text: str, n=40) -> str:
     return s[:n] or "x"
 
 
+def _interleave_by_host(listings: list[dict]) -> list[dict]:
+    """Εναλλάξ ανά κατάστημα (Amazon, Plaisio, Public, Amazon…) αντί για όλα της Amazon στη σειρά."""
+    groups: dict[str, list[dict]] = {}
+    for l in listings:
+        groups.setdefault(host_of(l.get("url") or ""), []).append(l)
+    out = []
+    queues = list(groups.values())
+    while queues:
+        for q in list(queues):
+            out.append(q.pop(0))
+            if not q:
+                queues.remove(q)
+    return out
+
+
+DETECT_RETRY_S = 30 * 86400
+
+
+def _detect_tried(settings) -> dict[str, float]:
+    """Πότε δοκιμάστηκε τελευταία η εύρεση αναζήτησης ανά κατάστημα (παλιά μορφή: απλή λίστα)."""
+    v = settings.get("detect_tried") or {}
+    if isinstance(v, list):
+        return {k: 0.0 for k in v}  # από v0.8.4: ξαναδοκιμάζονται μία φορά με τη νέα, καλύτερη εύρεση
+    return {k: float(t or 0) for k, t in v.items()}
+
+
+def _outbox_key(m: dict):
+    return (m.get("ts"), m.get("subject"))
+
+
 class Worker:
     def __init__(self, db, data_dir: Path, notify_callback=None, app_dir: Path | None = None):
         self.db = db
@@ -49,14 +82,17 @@ class Worker:
         self.detect: dict[int, dict] = {}  # shop_id → κατάσταση αυτόματης εύρεσης URL αναζήτησης
         # «Υγεία»: ό,τι σφάλμα θα περνούσε απαρατήρητο εμφανίζεται στην εφαρμογή
         self.health = {"scheduler_ts": None, "email_error": None, "email_error_at": None,
-                       "backup_ts": None, "backup_error": None}
+                       "backup_ts": None, "backup_error": None, "db_problems": []}
+        self._backup_retry_at = 0.0
         self.backup = None  # συνάρτηση: ημερήσιο αντίγραφο της βάσης στα Έγγραφα (από το app.py)
         self.retry_at = None  # επανάληψη των σελίδων που απέτυχαν (π.χ. χωρίς δίκτυο στην εκκίνηση)
         self.current = None  # η εργασία που τρέχει τώρα
-        self._gave_up_hosts: set[str] = set()
+        self._blocked_hosts: dict[str, float] = {}  # κατάστημα → έως πότε δεν ξαναδοκιμάζεται
+        self._jitter = 0.0
         self._stop = threading.Event()
         self._queued_keys: set = set()
         self._lock = threading.Lock()
+        self._outbox_lock = threading.RLock()
         self._thread = threading.Thread(target=self._loop, name="worker", daemon=True)
         self._sched = threading.Thread(target=self._scheduler, name="scheduler", daemon=True)
 
@@ -91,10 +127,11 @@ class Worker:
 
     def detect_new_default_shops(self):
         """Προεπιλεγμένα καταστήματα χωρίς URL αναζήτησης: η εφαρμογή το βρίσκει μόνη της (μία φορά το καθένα)."""
-        tried = set(self.db.get_settings().get("detect_tried") or [])
+        tried = _detect_tried(self.db.get_settings())
         keys = {s["key"] for s in DEFAULT_SHOPS}
         for sh in self.db.list_shops():
-            if sh["key"] in keys and not sh.get("search_url") and sh["key"] not in tried:
+            # Μια αποτυχία δεν μένει για πάντα: νέα προσπάθεια μετά από 30 μέρες (το κατάστημα μπορεί να άλλαξε)
+            if sh["key"] in keys and not sh.get("search_url") and time.time() - tried.get(sh["key"], 0) > DETECT_RETRY_S:
                 self.detect[sh["id"]] = {"state": "queued", "message": "Σε αναμονή…"}
                 self.enqueue("detect_search", shop_id=sh["id"])
 
@@ -110,13 +147,15 @@ class Worker:
 
     def _scheduler_tick(self, last: float, last_warranty: float) -> float:
         self.health["scheduler_ts"] = time.time()
-        if self.backup is not None:
+        if self.backup is not None and time.time() >= self._backup_retry_at:
             try:
                 if self.backup():
                     self.health["backup_ts"] = time.time()
-                self.health["backup_error"] = None
+                    self.health["backup_error"] = None  # μόνο ένα πετυχημένο αντίγραφο «σβήνει» το σφάλμα
             except Exception as e:  # noqa: BLE001
-                log.exception("backup failed")
+                # π.χ. το OneDrive κρατά το αρχείο: νέα προσπάθεια σε 1 ώρα (όχι κάθε 30" που γεμίζει το log)
+                self._backup_retry_at = time.time() + 3600
+                log.warning("backup failed: %s", e)
                 self.health["backup_error"] = str(e)[:300]
         try:
             self.retry_outbox()
@@ -141,13 +180,16 @@ class Worker:
                 self.enqueue("research_all")
         hours = analysis.current_interval_hours(settings)
         base = self.status.get("last_run_ts") or last
-        nxt = base + hours * 3600
+        nxt = base + hours * 3600 + self._jitter
         self.status["next_run"] = datetime.fromtimestamp(nxt).strftime("%Y-%m-%d %H:%M")
         # Ο έλεγχος μπαίνει στην ουρά στην ώρα του, ακόμα κι αν τρέχει άλλη εργασία (π.χ. η ημερήσια αναζήτηση).
         # Η ουρά δεν βάζει τον ίδιο έλεγχο δύο φορές· μόνο αν τρέχει ήδη έλεγχος όλων, περιμένει να τελειώσει.
         if time.time() >= nxt and self.current != "check_all":
             self.enqueue("check_all")
             self.status["last_run_ts"] = time.time()
+            # Μικρή τυχαία μετατόπιση (±10%, έως ±20 λεπτά) ώστε οι έλεγχοι να μη γίνονται πάντα στην ίδια ώρα
+            span = min(hours * 360, 1200)
+            self._jitter = random.uniform(-span, span)
         return last_warranty
 
     def _loop(self):
@@ -219,7 +261,11 @@ class Worker:
         br.restart(headless=False)
         page, res = br.open(url)
         self.status["task"] = "Περιμένω να λύσεις το captcha στο παράθυρο του browser…"
-        ok = br.wait_until(page, lambda html: not extract(html, url).blocked, timeout_s=180)
+        def solved(html):  # λύθηκε μόνο όταν φαίνεται πραγματικά το προϊόν, όχι απλώς «χωρίς captcha»
+            i = extract(html, url)
+            return not i.blocked and (i.price is not None or i.in_stock is not None)
+
+        ok = br.wait_until(page, solved, timeout_s=180)
         if ok:
             page.wait_for_timeout(1500)
             res.html, res.final_url = page.content(), page.url
@@ -244,16 +290,28 @@ class Worker:
         except Exception:  # noqa: BLE001
             self.fx = self.db.get_settings().get("fx") or {}
         alerts = []
-        self._gave_up_hosts = set()
         failed_net = 0
+        now = time.time()
+        self._blocked_hosts = {h: t for h, t in self._blocked_hosts.items() if t > now}
+        listings = _interleave_by_host(listings)
         try:
             with self._browser() as br:
                 for i, l in enumerate(listings, 1):
                     if self._stop.is_set():
                         break
                     self.status["progress"] = i
-                    if not self.db.get_listing(l["id"]):
-                        continue  # διαγράφηκε ενώ έτρεχε ο έλεγχος
+                    cur = self.db.get_listing(l["id"])
+                    if not cur or cur.get("status") not in (None, "active"):
+                        continue  # διαγράφηκε ή αναιρέθηκε η επιβεβαίωσή του ενώ έτρεχε ο έλεγχος
+                    host = host_of(l["url"])
+                    if self._blocked_hosts.get(host, 0) > time.time():
+                        msg = "Το κατάστημα μπλόκαρε πριν λίγο: παραλείφθηκε σε αυτόν τον έλεγχο"
+                        self._log(f"{l.get('shop_name')}: {msg}")
+                        try:
+                            self.db.record_check(l["id"], None, None, None, error=msg)
+                        except Exception:  # noqa: BLE001
+                            log.exception("record skip failed")
+                        continue  # δεν «σφυροκοπάμε» ένα κατάστημα που μόλις μας μπλόκαρε
                     try:
                         a = self._check_one(br, l, products[l["product_id"]], settings)
                         alerts += a
@@ -295,11 +353,11 @@ class Worker:
         try:
             info = extract(res.html, res.final_url)
             if not info.blocked and info.price is None and res.status in BLOCK_STATUS:
-                # π.χ. Akamai/Cloudflare: 403 χωρίς τιμή είναι μπλοκάρισμα, όχι απλό σφάλμα της σελίδας
-                info.blocked = f"Το κατάστημα μπλόκαρε προσωρινά την πρόσβαση (HTTP {res.status})"
-            if info.blocked and host in self._gave_up_hosts:
-                # Ένα captcha σε αυτό το κατάστημα δεν λύθηκε σε αυτόν τον κύκλο: δεν ξαναρωτάμε (ούτε παράθυρα τη νύχτα)
-                raise RuntimeError(info.blocked + " (παραλείφθηκε σε αυτόν τον έλεγχο)")
+                # 403/429/503 χωρίς captcha (π.χ. «Access Denied», συντήρηση): δεν ανοίγει παράθυρο, γιατί
+                # δεν υπάρχει κάτι να λύσει ο χρήστης. Το κατάστημα ξεκουράζεται 1 ώρα.
+                self._blocked_hosts[host] = time.time() + BLOCK_PAUSE_S
+                raise RuntimeError(f"Το κατάστημα μπλόκαρε προσωρινά την πρόσβαση (HTTP {res.status}). "
+                                   "Νέα προσπάθεια σε 1 ώρα.")
             if info.blocked and br.headless and self.browser_mode() == "auto":
                 try:
                     page.close()
@@ -309,34 +367,42 @@ class Worker:
                 got = self._ask_user_to_unblock(br, l["url"], info.blocked)
                 if got is None:
                     page = None
-                    self._gave_up_hosts.add(host)
+                    self._blocked_hosts[host] = time.time() + CAPTCHA_PAUSE_S
                     raise RuntimeError(info.blocked + " (δεν λύθηκε μέσα σε 3 λεπτά)")
                 page, res = got
                 info = extract(res.html, res.final_url)
             if info.blocked:
+                self._blocked_hosts[host] = time.time() + CAPTCHA_PAUSE_S
                 raise RuntimeError(info.blocked)
             if res.status and res.status >= 400 and info.price is None:
                 raise RuntimeError(f"Η σελίδα απάντησε HTTP {res.status}")
             if info.price is None and info.in_stock is None:
                 raise RuntimeError("Δεν βρέθηκε τιμή ή διαθεσιμότητα στη σελίδα")
-            in_stock = info.in_stock if info.in_stock is not None else (info.price is not None)
+            stock_known = info.in_stock is not None
+            in_stock = info.in_stock if stock_known else (info.price is not None)
             # Νόμισμα: αυτό που διάλεξε ο χρήστης (υπερισχύει), αλλιώς από τη σελίδα, αλλιώς από τη χώρα του καταστήματος
             info.currency = l.get("currency_override") or info.currency or currency_of_country(l.get("country"))
             if info.price is not None and not info.currency:
                 self._ask_currency(l, product)
             shot = None
-            # Screenshot: την πρώτη φορά (η μέρα που προστέθηκε) και μετά μόνο όταν πέφτει η τιμή.
-            # Όλα μένουν στον φάκελο του προϊόντος, Προϊόντα\<ημερομηνία προσθήκης> <όνομα>.
-            last = next((h for h in reversed(prev_ok) if h["price"] is not None), None)
+            # Screenshot ΜΟΝΟ όταν το προϊόν είναι διαθέσιμο σε αυτό το κατάστημα: την πρώτη φορά που βρέθηκε
+            # διαθέσιμο, όταν ξαναγίνει διαθέσιμο, και όταν πέφτει η τιμή. Όσο είναι εξαντλημένο, το κατάστημα
+            # μένει στη λίστα χωρίς screenshot. Όλα στον φάκελο Προϊόντα\<ημερομηνία προσθήκης> <όνομα>.
+            avail = [h for h in prev_ok if h["price"] is not None and h["in_stock"]]
+            last = avail[-1] if avail else None
             dropped = (last is not None and info.price is not None
                        and (last.get("currency") or "") == (info.currency or last.get("currency") or "")
                        and info.price < last["price"])
-            if info.price is not None and (last is None or dropped or settings.get("screenshot_mode") == "always"):
+            prev_stock = next((h for h in reversed(prev_ok) if h["in_stock"] is not None), None)
+            became_available = prev_stock is not None and not prev_stock["in_stock"]
+            had_shot = any(h.get("screenshot") and h["in_stock"] for h in prev_hist)
+            available_now = info.price is not None and in_stock
+            if available_now and (not had_shot or became_available or dropped
+                                  or settings.get("screenshot_mode") == "always"):
                 when = datetime.now().strftime("%d/%m/%Y %H:%M")
                 path = (productdirs.product_dir(self.db, self.data_dir, product) /
                         f"{datetime.now():%Y%m%d_%H%M%S}_{_slug(l.get('shop_name') or 'shop', 20)}.jpg")
-                price_txt = (fx.fmt_with_eur(info.price, info.currency, fx.to_eur(info.price, info.currency, self._fx()))
-                             + ("" if in_stock else " (μη διαθέσιμο)"))
+                price_txt = fx.fmt_with_eur(info.price, info.currency, fx.to_eur(info.price, info.currency, self._fx()))
                 shop_txt = f"{l.get('shop_name') or ''} · {host_of(res.final_url)}"
                 try:
                     br.screenshot(page, path, shop_txt, info.title or product["name"], price_txt, when)
@@ -352,13 +418,22 @@ class Worker:
             if interactive:
                 br.restart(headless=True)  # πίσω σε κρυφό browser για τα υπόλοιπα
         price_eur = fx.to_eur(info.price, info.currency, self._fx())
+        src = getattr(info, "price_source", None)
+        last_src = next((h.get("source") for h in reversed(prev_ok) if h["price"] is not None and h.get("source")), None)
+        if src and last_src and src != last_src:
+            # π.χ. από JSON-LD σε «γενική ανάγνωση»: πιθανή αλλαγή στη σελίδα του καταστήματος, αξίζει έλεγχο
+            self._log(f"{l.get('shop_name')}: η τιμή διαβάστηκε αλλιώς ({last_src} → {src}), έλεγξέ την")
         try:
             self.db.record_check(l["id"], info.price, info.currency, in_stock, title=info.title, screenshot=shot,
-                                 price_eur=price_eur)
+                                 price_eur=price_eur, source=src, stock_known=stock_known)
         except Exception:
             if shot:  # η σελίδα/το προϊόν διαγράφηκε στο μεταξύ: να μη μείνει ορφανό screenshot
                 productdirs.remove_tree(self.data_dir / shot)
             raise
+        if shot:
+            # Το νέο screenshot (με διαθεσιμότητα) αντικαθιστά όσα τραβήχτηκαν όταν το προϊόν δεν ήταν διαθέσιμο
+            for old in self.db.clear_unavailable_screenshots(l["id"], keep=shot):
+                productdirs.remove_tree(self.data_dir / old)
         # Συμπλήρωση στοιχείων προϊόντος αν λείπουν
         upd = {}
         for k_info, k_prod in (("ean", "ean"), ("mpn", "mpn"), ("brand", "brand"), ("image", "image_url")):
@@ -370,7 +445,7 @@ class Worker:
         price_s = f"{info.price:.2f}" if info.price else "-"
         self._log(f"✓ {l.get('shop_name')}: {price_s} {'διαθέσιμο' if in_stock else 'μη διαθέσιμο'}")
         return self._alerts_for(l, product, prev, prev_ok, info.price, info.currency, in_stock, shot, settings,
-                                price_eur=price_eur)
+                                price_eur=price_eur, stock_known=stock_known)
 
     def _ask_currency(self, l, product):
         """Η τιμή βρέθηκε αλλά όχι το νόμισμα: ζητάμε από τον χρήστη να το διαλέξει (μία ειδοποίηση)."""
@@ -390,9 +465,10 @@ class Worker:
             self.fx = self.db.get_settings().get("fx") or {}
         return self.fx
 
-    def _alerts_for(self, l, product, prev, prev_ok, price, currency, in_stock, shot, settings, price_eur=None):
-        if prev is None:
-            return []
+    def _alerts_for(self, l, product, prev, prev_ok, price, currency, in_stock, shot, settings, price_eur=None,
+                    stock_known=True):
+        """Ειδοποιήσεις για έναν έλεγχο. Όταν η σελίδα δεν λέει καθαρά αν υπάρχει απόθεμα (stock_known=False),
+        δεν στέλνεται «έφτασε τον στόχο» ούτε «ξανά διαθέσιμο»: καλύτερα καμία παρά μια ψεύτικη."""
         if price_eur is None and (currency or "").upper() == "EUR":
             price_eur = price
         base = {"product": product["name"], "shop": l.get("shop_name") or "", "region": l.get("region"),
@@ -401,30 +477,37 @@ class Worker:
                 "url": l["url"], "target": product.get("target_price"),
                 "screenshot": str(self.data_dir / shot) if shot else None}
         base["listing_id"] = l.get("id")
+
+        def eur_of(h):
+            v = h["price_eur"] if "price_eur" in h.keys() else None
+            return v if v is not None else (h["price"] if (h.get("currency") or "EUR").upper() == "EUR" else None)
+
         out = []
-        ok_stock = [h for h in prev_ok if h["in_stock"] is not None]
+        def known(h):  # η διαθεσιμότητα διαβάστηκε από τη σελίδα (όχι υπόθεση «έχει τιμή άρα διαθέσιμο»)
+            return h.get("stock_known") is None or bool(h.get("stock_known"))
+
+        ok_stock = [h for h in prev_ok if h["in_stock"] is not None and known(h)]
         # «Ξανά διαθέσιμο» μόνο αν ήταν εξαντλημένο σε δύο συνεχόμενους ελέγχους (όχι από μία λάθος ανάγνωση)
         was_out = bool(ok_stock) and not ok_stock[-1]["in_stock"] and (len(ok_stock) < 2 or not ok_stock[-2]["in_stock"])
-        if settings.get("notify_back_in_stock", True) and in_stock and was_out:
+        if stock_known and settings.get("notify_back_in_stock", True) and in_stock and was_out:
             out.append({**base, "kind": "in_stock"})
         tgt = product.get("target_price")
-        prev_eur = prev.get("price_eur") if "price_eur" in prev.keys() else None
-        if prev_eur is None and (prev.get("currency") or "").upper() == "EUR":
-            prev_eur = prev["price"]
-        # Η τιμή-στόχος είναι σε €: συγκρίνεται με την τιμή σε € (μετά τη μετατροπή αν χρειάζεται)
-        if settings.get("notify_target_price", True) and tgt and price_eur and in_stock and price_eur <= tgt and \
-                not (prev_eur and prev_eur <= tgt and prev["in_stock"]):
+        # Σύγκριση με τον τελευταίο έλεγχο ΜΕ τιμή: ένα «99 → χωρίς τιμή → 99» δεν ξαναστέλνει ειδοποίηση
+        last_priced = next((h for h in reversed(prev_ok) if h["price"] is not None and known(h)), None)
+        prev_eur = eur_of(last_priced) if last_priced else None
+        prev_hit = bool(prev_eur and tgt and prev_eur <= tgt and last_priced["in_stock"])
+        # Η τιμή-στόχος είναι σε €: συγκρίνεται με την τιμή σε €. Ισχύει και στον πρώτο έλεγχο.
+        if stock_known and settings.get("notify_target_price", True) and tgt and price_eur and in_stock \
+                and price_eur <= tgt and not prev_hit:
             out.append({**base, "kind": "target"})
-        if settings.get("notify_new_low", True) and price and in_stock and not out:
-            # Σε €, ώστε τιμές σε ξένο νόμισμα να συγκρίνονται σωστά
-            def eur_of(h):
-                v = h["price_eur"] if "price_eur" in h.keys() else None
-                return v if v is not None else (h["price"] if (h.get("currency") or "EUR").upper() == "EUR" else None)
-
+        out = [a for a in out if not self._recently_sent(a)]
+        if prev is not None and settings.get("notify_new_low", True) and price and in_stock and not out:
             prices = [v for v in (eur_of(h) for h in prev_ok if h["price"]) if v]
             if price_eur and len(prices) >= 3 and price_eur < min(prices) * 0.99:
-                out.append({**base, "kind": "new_low"})
-        return [a for a in out if not self._recently_sent(a)]
+                a = {**base, "kind": "new_low"}
+                if not self._recently_sent(a):
+                    out.append(a)
+        return out
 
     def _recently_sent(self, a) -> bool:
         """Η ίδια ειδοποίηση για την ίδια σελίδα δεν ξαναστέλνεται μέσα σε 24 ώρες, εκτός αν η τιμή έπεσε κι άλλο."""
@@ -459,42 +542,87 @@ class Worker:
         """Στέλνει email. Αν αποτύχει, μπαίνει σε ουρά και ξαναδοκιμάζεται (έως 48 ώρες), και το σφάλμα
         φαίνεται στην εφαρμογή αντί να χάνεται σε ένα log."""
         try:
-            pw = notifier.load_password(self.db, settings.get("smtp_user", ""))
-            notifier.send_email(settings, pw, subject, text, body, [Path(p) for p in attachments or []])
-            self._log(f"Στάλθηκε email: {subject}")
-            self.health.update(email_error=None, email_error_at=None)
+            self._send_now(settings, subject, text, body, attachments)
             return True
         except Exception as e:  # noqa: BLE001
-            msg = (str(e).splitlines() or [type(e).__name__])[0][:300]
-            self._log(f"Αποτυχία email: {msg}")
-            self.health.update(email_error=msg, email_error_at=datetime.now().strftime("%d/%m %H:%M"))
-            if queue_on_fail:
-                box = list(self.db.get_settings().get("email_outbox") or [])
-                box.append({"subject": subject, "text": text, "body": body, "attachments": list(attachments or []),
-                            "ts": time.time(), "tries": 1})
-                self.db.set_settings({"email_outbox": box[-50:]})
+            permanent = self._email_failed(e)
+            if queue_on_fail and not permanent:
+                with self._outbox_lock:
+                    box = list(self.db.get_settings().get("email_outbox") or [])
+                    box.append({"subject": subject, "text": text, "body": body,
+                                "attachments": list(attachments or []), "ts": time.time(), "tries": 1})
+                    self.db.set_settings({"email_outbox": box[-50:]})
             return False
 
+    def _send_now(self, settings, subject, text, body=None, attachments=None):
+        user = settings.get("smtp_user", "")
+        pw = notifier.load_password(self.db, user)
+        if not pw and user and notifier.host_changed(self.db):
+            raise RuntimeError("Άλλαξε ο SMTP server: γράψε ξανά τον κωδικό εφαρμογής στις Ρυθμίσεις")
+        notifier.send_email(settings, pw, subject, text, body, [Path(p) for p in attachments or []])
+        self._log(f"Στάλθηκε email: {subject}")
+        self.health.update(email_error=None, email_error_at=None)
+        self._email_tray_warned = False
+
+    def _email_failed(self, e) -> bool:
+        """Καταγράφει το σφάλμα email. Επιστρέφει True αν είναι μόνιμο για ΑΥΤΟ το μήνυμα (π.χ. ο server το
+        απέρριψε επειδή είναι μεγάλο): τότε δεν ξαναδοκιμάζεται, ώστε να μη μπλοκάρει τα υπόλοιπα."""
+        import smtplib
+
+        msg = (str(e).splitlines() or [type(e).__name__])[0][:300]
+        self._log(f"Αποτυχία email: {msg}")
+        self.health.update(email_error=msg, email_error_at=datetime.now().strftime("%d/%m %H:%M"))
+        if self.notify_callback and not getattr(self, "_email_tray_warned", False):
+            self._email_tray_warned = True  # μία ειδοποίηση ανά σφάλμα, όχι σε κάθε προσπάθεια
+            try:
+                self.notify_callback("Τα email ειδοποιήσεων δεν στέλνονται. Δες την εφαρμογή.")
+            except Exception:  # noqa: BLE001
+                pass
+        if isinstance(e, smtplib.SMTPRecipientsRefused):  # π.χ. λάθος διεύθυνση παραλήπτη (550)
+            codes = [int(v[0]) for v in (e.recipients or {}).values() if isinstance(v, tuple) and v]
+            return bool(codes) and all(500 <= c < 600 for c in codes)
+        if isinstance(e, (smtplib.SMTPSenderRefused, smtplib.SMTPDataError)):
+            code = int(getattr(e, "smtp_code", 0) or 0)
+            return 500 <= code < 600 and code not in (530, 534, 535)
+        return False
+
     def retry_outbox(self, force: bool = False):
-        """Ξαναστέλνει τα email που απέτυχαν (κάθε 15 λεπτά)."""
+        """Ξαναστέλνει τα email που απέτυχαν (κάθε 15 λεπτά). Ένα μήνυμα που απορρίπτεται μόνιμα βγαίνει από
+        την ουρά. Σε σφάλμα σύνδεσης/κωδικού σταματά και ξαναδοκιμάζει αργότερα."""
         settings = self.db.get_settings()
-        box = list(settings.get("email_outbox") or [])
-        if not box or not settings.get("email_enabled"):
+        if not (settings.get("email_outbox") or []) or not settings.get("email_enabled"):
             return
         if not force and time.time() - getattr(self, "_last_outbox_try", 0) < 900:
             return
         self._last_outbox_try = time.time()
-        keep = []
-        for i, m in enumerate(box):
+        # Τα μηνύματα μένουν στη βάση όσο στέλνονται (ένα κλείσιμο της εφαρμογής δεν τα χάνει). Η αποστολή
+        # γίνεται ΕΚΤΟΣ lock, ώστε ένα αργό SMTP να μη σταματά τους ελέγχους· στο τέλος, κάτω από το lock,
+        # αφαιρούνται μόνο όσα στάλθηκαν/απορρίφθηκαν και κρατιούνται όσα μπήκαν στο μεταξύ.
+        with self._outbox_lock:
+            box = list(self.db.get_settings().get("email_outbox") or [])
+        done: set = set()
+        updated: dict = {}
+        for m in box:
+            k = _outbox_key(m)
             if time.time() - float(m.get("ts") or 0) > OUTBOX_MAX_AGE_H * 3600:
                 self._log(f"Το email «{m.get('subject')}» δεν στάλθηκε μέσα σε 48 ώρες και διαγράφηκε")
+                done.add(k)
                 continue
-            if self._email(settings, m["subject"], m["text"], m.get("body"), m.get("attachments"), queue_on_fail=False):
+            try:
+                self._send_now(settings, m["subject"], m["text"], m.get("body"), m.get("attachments"))
+                done.add(k)
                 continue
-            m["tries"] = int(m.get("tries") or 1) + 1
-            keep = [m] + box[i + 1:]  # ο server δεν απαντά: τα υπόλοιπα την επόμενη φορά
-            break
-        self.db.set_settings({"email_outbox": keep})
+            except Exception as e:  # noqa: BLE001
+                if self._email_failed(e):
+                    self._log(f"Το email «{m.get('subject')}» απορρίφθηκε από τον server και διαγράφηκε")
+                    done.add(k)
+                    continue
+            updated[k] = {**m, "tries": int(m.get("tries") or 1) + 1}
+            break  # ο server δεν απαντά ή ο κωδικός είναι λάθος: τα υπόλοιπα την επόμενη φορά
+        with self._outbox_lock:
+            cur = list(self.db.get_settings().get("email_outbox") or [])
+            out = [updated.get(_outbox_key(m), m) for m in cur if _outbox_key(m) not in done]
+            self.db.set_settings({"email_outbox": out[-50:]})
 
     def check_warranties(self, today=None):
         """Ειδοποίηση μία φορά όταν πλησιάζει η λήξη μιας εγγύησης."""
@@ -518,7 +646,10 @@ class Worker:
         subject = (f"[Price Tracker] Λήγει η εγγύηση: {due[0][0]['name']}" if len(due) == 1
                    else f"[Price Tracker] Λήγουν {len(due)} εγγυήσεις")
         text = "Πλησιάζει η λήξη εγγύησης για:\n\n" + "\n".join(lines)
-        if self.notify_callback:
+        keys = {k for _, _, k in due}
+        shown = getattr(self, "_warranty_tray_shown", set())
+        if self.notify_callback and not keys <= shown:  # στο tray μία φορά, όχι σε κάθε νέα προσπάθεια email
+            self._warranty_tray_shown = shown | keys
             try:
                 self.notify_callback(subject.replace("[Price Tracker] ", ""))
             except Exception:  # noqa: BLE001
@@ -542,7 +673,7 @@ class Worker:
         if search:
             self.search_product(product_id)
 
-    def detect_search(self, shop_id: int, word: str = "samsung"):
+    def detect_search(self, shop_id: int, word: str | None = None):
         """Βρίσκει μόνο του το URL αναζήτησης ενός καταστήματος από την αρχική του σελίδα."""
         shop = self.db.get_shop(shop_id)
         if not shop:
@@ -564,31 +695,35 @@ class Worker:
                         self._log(f"{url}: {e}")
                 if home is None:
                     raise RuntimeError("Δεν άνοιξε η αρχική σελίδα του καταστήματος")
-                cands = search_url_candidates(home.html, home.final_url)
+                cands = search_url_candidates(home.html, home.final_url)[:16]
                 structured = [c for c in cands if not any(c.endswith(p) for p in _common_paths())]
                 guess = structured[0] if structured else None
-                self.status["total"] = min(len(cands), 8)
-                for i, tmpl in enumerate(cands[:8], 1):
-                    if self._stop.is_set():
+                words = [word] if word else (probe_words(home.html) + ["samsung"])[:2]
+                self.status["total"] = len(cands)
+                for i, tmpl in enumerate(cands, 1):
+                    if self._stop.is_set() or found:
                         break
                     self.status["progress"] = i
-                    try:
-                        page, res = br.open(search_url(tmpl, word), timeout_ms=30000)
-                        page.close()
-                    except Exception:  # noqa: BLE001
-                        continue
-                    if (not res.status or res.status < 400) and looks_like_search_results(
-                            res.html, res.final_url, word, home.final_url):
-                        found = tmpl
-                        break
+                    for w in words:
+                        try:
+                            page, res = br.open(search_url(tmpl, w), timeout_ms=30000)
+                            page.close()
+                        except Exception:  # noqa: BLE001
+                            break
+                        if res.status and res.status >= 400:
+                            break  # η διεύθυνση δεν υπάρχει: επόμενο μοτίβο
+                        if looks_like_search_results(res.html, res.final_url, w, home.final_url):
+                            found = tmpl
+                            break
         except Exception as e:  # noqa: BLE001
             st.update(state="notfound", message=f"Δεν βρέθηκε: {e}")
             self._log(f"{shop['name']}: εύρεση αναζήτησης απέτυχε: {e}")
             return
         sh = self.db.get_shop(shop_id)
         if sh:
-            tried = set(self.db.get_settings().get("detect_tried") or [])
-            self.db.set_settings({"detect_tried": sorted(tried | {sh["key"]})})
+            tried = _detect_tried(self.db.get_settings())
+            tried[sh["key"]] = time.time()
+            self.db.set_settings({"detect_tried": tried})
         url = found or guess
         if url and not (self.db.get_shop(shop_id) or {}).get("search_url"):
             self.db.update_shop(shop_id, search_url=url, search_enabled=1)
@@ -627,11 +762,7 @@ class Worker:
             except Exception:  # noqa: BLE001
                 pass
         if settings.get("email_enabled"):
-            try:
-                pw = notifier.load_password(self.db, settings.get("smtp_user", ""))
-                notifier.send_email(settings, pw, subject, text)
-            except Exception as e:  # noqa: BLE001
-                self._log(f"Αποτυχία email: {e}")
+            self._email(settings, subject, text)  # σε αποτυχία μπαίνει στην ουρά και φαίνεται στο «Υγεία»
         self._log(subject.replace("[Price Tracker] ", ""))
 
     def search_shops(self, product_id: int, have_shops=frozenset()) -> list[dict]:

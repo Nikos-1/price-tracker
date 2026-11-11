@@ -105,7 +105,7 @@ MIGRATIONS = {
     "categories": [("sector_id", "INTEGER REFERENCES sectors(id) ON DELETE SET NULL")],
     "shops": [("country", "TEXT")],
     "listings": [("last_price_eur", "REAL"), ("currency_override", "TEXT"), ("currency_asked", "INTEGER")],
-    "price_history": [("price_eur", "REAL")],
+    "price_history": [("price_eur", "REAL"), ("source", "TEXT"), ("stock_known", "INTEGER")],
 }
 
 DEFAULT_SETTINGS = {
@@ -419,6 +419,21 @@ class Database:
                 (*ids, *ids)).fetchall()
         return {r[0] for r in rows}
 
+    def clear_unavailable_screenshots(self, listing_id: int, keep: str | None = None) -> list[str]:
+        """Αφαιρεί από το ιστορικό τα screenshot που τραβήχτηκαν όταν το προϊόν ΔΕΝ ήταν διαθέσιμο (ή χωρίς
+        τιμή) και επιστρέφει τα αρχεία τους για διαγραφή, εκτός αν τα χρησιμοποιεί και άλλη γραμμή."""
+        with self.conn() as c:
+            rows = c.execute("SELECT id, screenshot FROM price_history WHERE listing_id=? AND screenshot IS NOT NULL"
+                             " AND (COALESCE(in_stock, 0)=0 OR price IS NULL)", (listing_id,)).fetchall()
+            files = {r["screenshot"] for r in rows if r["screenshot"] != keep}
+            c.executemany("UPDATE price_history SET screenshot=NULL WHERE id=?", [(r["id"],) for r in rows
+                                                                                    if r["screenshot"] != keep])
+            still = {r[0] for r in c.execute("SELECT screenshot FROM price_history WHERE screenshot IS NOT NULL")}
+            last = c.execute("SELECT last_screenshot FROM listings WHERE id=?", (listing_id,)).fetchone()
+            if last and last[0] in files:
+                c.execute("UPDATE listings SET last_screenshot=? WHERE id=?", (keep, listing_id))
+        return sorted(f for f in files if f not in still)
+
     def shop_listing_ids(self, shop_id: int) -> list[int]:
         with self.conn() as c:
             return [r[0] for r in c.execute("SELECT id FROM listings WHERE shop_id=?", (shop_id,))]
@@ -608,6 +623,12 @@ class Database:
         with self.conn() as c:
             c.execute("UPDATE listings SET currency_asked=1 WHERE id=?", (listing_id,))
 
+    def clear_history(self, listing_id: int):
+        with self.conn() as c:
+            c.execute("DELETE FROM price_history WHERE listing_id=?", (listing_id,))
+            c.execute("UPDATE listings SET last_price=NULL, last_currency=NULL, last_in_stock=NULL, last_checked=NULL,"
+                      " last_error=NULL, last_screenshot=NULL, last_price_eur=NULL WHERE id=?", (listing_id,))
+
     def set_listing_status(self, listing_id: int, status: str):
         with self.conn() as c:
             c.execute("UPDATE listings SET status=? WHERE id=?", (status, listing_id))
@@ -617,16 +638,16 @@ class Database:
             c.execute("DELETE FROM listings WHERE id=?", (listing_id,))
 
     def record_check(self, listing_id, price, currency, in_stock, title=None, screenshot=None, error=None,
-                     price_eur=None):
+                     price_eur=None, source=None, stock_known=None):
         ts = now_iso()
         if price_eur is None and price is not None and (currency or "").upper() == "EUR":
             price_eur = price
         with self.conn() as c:
             c.execute(
                 "INSERT INTO price_history(listing_id, checked_at, price, currency, in_stock, screenshot, error,"
-                " price_eur) VALUES(?,?,?,?,?,?,?,?)",
+                " price_eur, source, stock_known) VALUES(?,?,?,?,?,?,?,?,?,?)",
                 (listing_id, ts, price, currency, None if in_stock is None else int(in_stock), screenshot, error,
-                 price_eur),
+                 price_eur, source, None if stock_known is None else int(stock_known)),
             )
             if error:
                 c.execute("UPDATE listings SET last_checked=?, last_error=? WHERE id=?", (ts, error, listing_id))

@@ -1,13 +1,14 @@
 :root {
   --bg: #f5f6f8; --panel: #ffffff; --text: #111827; --muted: #6b7280; --border: #e5e7eb;
-  --accent: #2563eb; --accent-text: #ffffff; --ok: #15803d; --bad: #b91c1c; --warn: #b45309;
-  --chip: #eef2ff; --shadow: 0 1px 3px rgba(0,0,0,.08);
+  --accent: #2563eb; --accent-text: #ffffff; --ok: #15803d; --bad: #b91c1c; --warn: #92400e;
+  --chip: #eef2ff; --shadow: 0 1px 3px rgba(0,0,0,.08); --muted: #4b5563; --field: #8b93a1;
+  --topbar-h: 54px;
 }
 @media (prefers-color-scheme: dark) {
   :root {
     --bg: #0f1115; --panel: #181b21; --text: #e5e7eb; --muted: #9ca3af; --border: #2a2f38;
-    --accent: #3b82f6; --ok: #4ade80; --bad: #f87171; --warn: #fbbf24; --chip: #1e2533;
-    --shadow: none;
+    --accent: #2563eb; --ok: #4ade80; --bad: #f87171; --warn: #fbbf24; --chip: #1e2533;
+    --shadow: none; --field: #6b7280; --link: #93c5fd;
   }
 }
 * { box-sizing: border-box; }
@@ -19,12 +20,15 @@ button.primary { background: var(--accent); color: var(--accent-text); border-co
 button.danger { color: var(--bad); }
 button.link { border: none; background: none; color: var(--accent); padding: 4px 0; }
 button.small { padding: 2px 8px; font-size: 12px; }
-input, select, textarea { font: inherit; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px;
+input, select, textarea { font: inherit; padding: 6px 8px; border: 1px solid var(--field); border-radius: 6px;
   background: var(--panel); color: var(--text); width: 100%; }
 label { display: block; margin: 10px 0 4px; color: var(--muted); font-size: 13px; }
 label.inline { display: flex; gap: 8px; align-items: center; color: var(--text); }
 label.inline input { width: auto; }
-a { color: var(--accent); }
+a { color: var(--link, var(--accent)); }
+button.link { color: var(--link, var(--accent)); }
+button:disabled { opacity: .6; cursor: progress; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 .topbar { display: flex; align-items: center; gap: 16px; padding: 10px 16px; background: var(--panel);
   border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 5; flex-wrap: wrap; }
@@ -33,7 +37,7 @@ a { color: var(--accent); }
 .status .run { color: var(--accent); }
 .actions { display: flex; gap: 8px; flex-wrap: wrap; }
 
-.layout { display: flex; min-height: calc(100vh - 54px); }
+.layout { display: flex; min-height: calc(100vh - var(--topbar-h)); }
 .sidebar { width: 240px; flex-shrink: 0; padding: 14px; border-right: 1px solid var(--border); background: var(--panel); }
 .sidebar h3 { font-size: 12px; text-transform: uppercase; color: var(--muted); margin: 18px 0 6px; letter-spacing: .04em; }
 .tabs { display: flex; flex-direction: column; gap: 4px; }
@@ -43,7 +47,7 @@ a { color: var(--accent); }
 .cats li { display: flex; align-items: center; gap: 4px; padding: 5px 8px; border-radius: 6px; cursor: pointer; }
 .cats li .n { margin-left: auto; color: var(--muted); font-size: 12px; }
 .cats li .ops { display: none; gap: 2px; }
-.cats li:hover .ops { display: flex; }
+.cats li:hover .ops, .cats li:focus-within .ops { display: flex; }
 .cats li .ops button { border: none; padding: 0 4px; background: none; }
 .bf-box { margin-top: 24px; padding: 10px; border-radius: 8px; background: var(--chip); font-size: 13px; }
 
@@ -83,13 +87,17 @@ td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
   max-height: calc(100vh - 40px); overflow: auto; }
 .modal.wide { width: min(1000px, calc(100vw - 32px)); }
 .modal h2 { margin: 0 0 8px; font-size: 18px; }
-.modal .btns { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; flex-wrap: wrap; }
+/* Τα κουμπιά του παραθύρου φαίνονται πάντα, ακόμα κι όταν το περιεχόμενο είναι ψηλότερο από την οθόνη */
+.modal .btns { display: flex; justify-content: flex-end; gap: 8px; margin: 18px -20px -20px; padding: 12px 20px 16px;
+  flex-wrap: wrap; position: sticky; bottom: -20px; background: var(--panel); border-top: 1px solid var(--border);
+  border-radius: 0 0 12px 12px; }
 .modal img.full { max-width: 100%; }
 .hint { color: var(--muted); font-size: 12px; margin-top: 4px; }
 .two { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: #111827; color: #fff;
   padding: 10px 16px; border-radius: 8px; z-index: 60; max-width: 90vw; }
 .toast.hidden { display: none; }
+.toast .toast-act { margin-left: 10px; background: #fff; color: #111827; border-color: #fff; }
 .log { font-family: Consolas, monospace; font-size: 12px; max-height: 200px; overflow: auto; white-space: pre-wrap; color: var(--muted); }
 
 @media (max-width: 720px) {
@@ -104,7 +112,7 @@ html, body, * { scrollbar-width: none; -ms-overflow-style: none; }
 ::-webkit-scrollbar, *::-webkit-scrollbar { display: none; width: 0; height: 0; }
 html.settings-view .sidebar { display: none; }
 .page { max-width: 1100px; margin: 0 auto; }
-.page-head { display: flex; align-items: center; gap: 8px; position: sticky; top: 54px; z-index: 4; background: var(--bg);
+.page-head { display: flex; align-items: center; gap: 8px; position: sticky; top: var(--topbar-h); z-index: 4; background: var(--bg);
   padding: 8px 0; margin-top: -8px; }
 .page-head h2 { margin: 0 0 0 6px; font-size: 20px; }
 .page-head .grow { flex: 1; }
@@ -125,4 +133,18 @@ tr.group-row td { background: var(--chip); font-weight: 600; font-size: 12px; te
 .topbar { flex-wrap: wrap; }
 .health { flex-basis: 100%; order: 10; color: var(--warn); font-size: 13px; line-height: 1.5; }
 .health.hidden { display: none; }
+.health { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: flex-start; background: var(--chip); border-radius: 8px;
+  padding: 6px 10px; max-height: 30vh; overflow: auto; }
+.health .h-item { flex: 1 1 100%; padding-right: 30px; }
+.health .h-close { position: absolute; right: 24px; margin-top: 2px; }
+.health { position: relative; }
+/* Στενό παράθυρο: η σελίδα προϊόντος χωρά χωρίς πλάγια κύλιση (που χωρίς scrollbar θα ήταν αόρατη) */
+.only-narrow { display: none; }
+@media (max-width: 1150px) {
+  .col-shot, .col-checked { display: none; }
+  .only-narrow { display: block; }
+  .detail table { font-size: 13px; }
+  .detail th, .detail td { padding: 5px 5px; }
+}
+main { overflow-wrap: anywhere; }
 .status .warn { color: var(--warn); }

@@ -45,7 +45,10 @@ if ($Mode -eq 'setup') {
   if ($p.ExitCode -ne 0) { "$($p.ExitCode)" | Out-File -Encoding ascii $FailFile }
 } else {
   robocopy $Src $Dst /E /R:10 /W:2 /NFL /NDL /NJH /NJS /NP | Out-File -Append -Encoding utf8 $Log
-  "$(Get-Date -Format s) robocopy exit $LASTEXITCODE" | Out-File -Append -Encoding utf8 $Log
+  $rc = $LASTEXITCODE
+  "$(Get-Date -Format s) robocopy exit $rc" | Out-File -Append -Encoding utf8 $Log
+  # robocopy: 0-7 = επιτυχία (με ή χωρίς αλλαγές), 8 και πάνω = κάποια αρχεία δεν αντιγράφηκαν
+  if ($rc -ge 8) { "$rc" | Out-File -Encoding ascii $FailFile }
 }
 if ($ExeArgs) { Start-Process -FilePath $Exe -ArgumentList $ExeArgs } else { Start-Process -FilePath $Exe }
 """
@@ -172,10 +175,23 @@ class Updater:
             self.state.update(state="error", message=f"Η αυτόματη εγκατάσταση της έκδοσης {failed} απέτυχε. "
                                                      "Πάτησε «Εγκατάσταση» για να ξαναδοκιμάσεις.")
             return
-        if self.db.get_settings().get("auto_update", True):
-            self._install_now()
+        ver = self._release["version"]
+        settings = self.db.get_settings()
+        from . import analysis
+
+        if not settings.get("auto_update", True):
+            self.notify(f"Υπάρχει νέα έκδοση {ver}. Εγκατάσταση από τις Ρυθμίσεις.")
+        elif not install_dir_writable():
+            # Program Files: η εγκατάσταση θέλει άδεια διαχειριστή. Αθόρυβα (π.χ. τη νύχτα) κανείς δεν θα την
+            # έδινε και η εφαρμογή θα έμενε κλειστή. Μόνο ειδοποίηση· εγκατάσταση με κλικ.
+            self.state.update(message=f"Υπάρχει νέα έκδοση {ver}. Πάτησε «Εγκατάσταση» (θα ζητηθεί άδεια διαχειριστή).")
+            self.notify(f"Υπάρχει νέα έκδοση {ver}. Άνοιξε τις Ρυθμίσεις και πάτησε «Εγκατάσταση».")
+        elif analysis.in_bf_window(settings):
+            # Περίοδος Black Friday: καμία αθόρυβη αλλαγή στην εφαρμογή όσο οι έλεγχοι γίνονται κάθε ώρα
+            self.state.update(message=f"Υπάρχει νέα έκδοση {ver}. Στην περίοδο Black Friday εγκαθίσταται μόνο με κλικ.")
+            self.notify(f"Υπάρχει νέα έκδοση {ver}. Εγκατάσταση από τις Ρυθμίσεις όποτε θέλεις.")
         else:
-            self.notify(f"Υπάρχει νέα έκδοση {self._release['version']}. Εγκατάσταση από τις Ρυθμίσεις.")
+            self._install_now()
 
     def _fail_file(self) -> Path:
         return self.dir / "update_failed.txt"
@@ -183,13 +199,17 @@ class Updater:
     def _failed_version(self) -> str | None:
         """Αν η τελευταία σιωπηλή εγκατάσταση απέτυχε, ποια έκδοση ήταν."""
         f, pending = self._fail_file(), self.dir / "update_pending.txt"
-        if not f.exists():
-            if pending.exists() and pending.read_text(encoding="utf-8").strip() != __version__ \
-                    and time.time() - pending.stat().st_mtime > 600:
-                # ξεκίνησε η εγκατάσταση αλλά η εφαρμογή ξανάνοιξε με την παλιά έκδοση
-                return pending.read_text(encoding="utf-8").strip()
+        want = pending.read_text(encoding="utf-8").strip() if pending.exists() else None
+        if want and parse_version(want) <= parse_version(__version__):
+            # Η ενημέρωση πέτυχε: καθαρισμός, ώστε να μη μετρήσει ποτέ ως αποτυχία
+            pending.unlink(missing_ok=True)
+            f.unlink(missing_ok=True)
             return None
-        return pending.read_text(encoding="utf-8").strip() if pending.exists() else "?"
+        if want:
+            # Ξεκίνησε η εγκατάσταση, αλλά η εφαρμογή ξανάνοιξε με την παλιά έκδοση: απέτυχε
+            # (ανεξάρτητα από το πόση ώρα πέρασε, αλλιώς λήψη-κλείσιμο-αποτυχία ξανά και ξανά)
+            return want
+        return "?" if f.exists() else None
 
     def _fetch(self, url: str, sha_url: str | None, dest: Path) -> Path:
         if not sha_url:  # χωρίς έλεγχο ακεραιότητας δεν εγκαθίσταται τίποτα
