@@ -285,7 +285,7 @@ def availability_from_page(soup) -> bool | None:
         return True
     if area is not None:
         out, inn = _phrases_in(_area_text(area)[:8000])
-        if out and (disabled_cart or not inn) and not (enabled_cart and not disabled_cart):
+        if out and (disabled_cart or not inn):
             return False  # «Εξαντλήθηκε» (και ανενεργό κουμπί καλαθιού)
         if out != inn:
             return inn
