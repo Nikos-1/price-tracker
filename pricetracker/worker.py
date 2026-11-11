@@ -147,7 +147,7 @@ class Worker:
             try:
                 if self.backup():
                     self.health["backup_ts"] = time.time()
-                self.health["backup_error"] = None
+                    self.health["backup_error"] = None  # μόνο ένα πετυχημένο αντίγραφο «σβήνει» το σφάλμα
             except Exception as e:  # noqa: BLE001
                 # π.χ. το OneDrive κρατά το αρχείο: νέα προσπάθεια σε 1 ώρα (όχι κάθε 30" που γεμίζει το log)
                 self._backup_retry_at = time.time() + 3600
@@ -415,7 +415,7 @@ class Worker:
             self._log(f"{l.get('shop_name')}: η τιμή διαβάστηκε αλλιώς ({last_src} → {src}), έλεγξέ την")
         try:
             self.db.record_check(l["id"], info.price, info.currency, in_stock, title=info.title, screenshot=shot,
-                                 price_eur=price_eur, source=src)
+                                 price_eur=price_eur, source=src, stock_known=stock_known)
         except Exception:
             if shot:  # η σελίδα/το προϊόν διαγράφηκε στο μεταξύ: να μη μείνει ορφανό screenshot
                 productdirs.remove_tree(self.data_dir / shot)
@@ -469,14 +469,17 @@ class Worker:
             return v if v is not None else (h["price"] if (h.get("currency") or "EUR").upper() == "EUR" else None)
 
         out = []
-        ok_stock = [h for h in prev_ok if h["in_stock"] is not None]
+        def known(h):  # η διαθεσιμότητα διαβάστηκε από τη σελίδα (όχι υπόθεση «έχει τιμή άρα διαθέσιμο»)
+            return h.get("stock_known") is None or bool(h.get("stock_known"))
+
+        ok_stock = [h for h in prev_ok if h["in_stock"] is not None and known(h)]
         # «Ξανά διαθέσιμο» μόνο αν ήταν εξαντλημένο σε δύο συνεχόμενους ελέγχους (όχι από μία λάθος ανάγνωση)
         was_out = bool(ok_stock) and not ok_stock[-1]["in_stock"] and (len(ok_stock) < 2 or not ok_stock[-2]["in_stock"])
         if stock_known and settings.get("notify_back_in_stock", True) and in_stock and was_out:
             out.append({**base, "kind": "in_stock"})
         tgt = product.get("target_price")
         # Σύγκριση με τον τελευταίο έλεγχο ΜΕ τιμή: ένα «99 → χωρίς τιμή → 99» δεν ξαναστέλνει ειδοποίηση
-        last_priced = next((h for h in reversed(prev_ok) if h["price"] is not None), None)
+        last_priced = next((h for h in reversed(prev_ok) if h["price"] is not None and known(h)), None)
         prev_eur = eur_of(last_priced) if last_priced else None
         prev_hit = bool(prev_eur and tgt and prev_eur <= tgt and last_priced["in_stock"])
         # Η τιμή-στόχος είναι σε €: συγκρίνεται με την τιμή σε €. Ισχύει και στον πρώτο έλεγχο.
@@ -561,9 +564,12 @@ class Worker:
                 self.notify_callback("Τα email ειδοποιήσεων δεν στέλνονται. Δες την εφαρμογή.")
             except Exception:  # noqa: BLE001
                 pass
-        if isinstance(e, (smtplib.SMTPRecipientsRefused, smtplib.SMTPSenderRefused, smtplib.SMTPDataError)):
-            code = getattr(e, "smtp_code", None) or 0
-            return 500 <= int(code) < 600 and int(code) not in (530, 534, 535)
+        if isinstance(e, smtplib.SMTPRecipientsRefused):  # π.χ. λάθος διεύθυνση παραλήπτη (550)
+            codes = [int(v[0]) for v in (e.recipients or {}).values() if isinstance(v, tuple) and v]
+            return bool(codes) and all(500 <= c < 600 for c in codes)
+        if isinstance(e, (smtplib.SMTPSenderRefused, smtplib.SMTPDataError)):
+            code = int(getattr(e, "smtp_code", 0) or 0)
+            return 500 <= code < 600 and code not in (530, 534, 535)
         return False
 
     def retry_outbox(self, force: bool = False):
@@ -575,10 +581,14 @@ class Worker:
         if not force and time.time() - getattr(self, "_last_outbox_try", 0) < 900:
             return
         self._last_outbox_try = time.time()
-        with self._outbox_lock:  # ένα νέο email που αποτυγχάνει στο μεταξύ δεν χάνεται
+        # Η ουρά «παραλαμβάνεται» κάτω από το lock και στέλνεται ΕΚΤΟΣ lock (ένα αργό SMTP δεν σταματά τους
+        # ελέγχους). Όσα email αποτύχουν στο μεταξύ μπαίνουν στην ουρά και κρατιούνται στο τέλος.
+        with self._outbox_lock:
             box = list(self.db.get_settings().get("email_outbox") or [])
-            keep = []
-            stop = False
+            self.db.set_settings({"email_outbox": []})
+        keep = []
+        stop = False
+        try:
             for m in box:
                 if stop:
                     keep.append(m)
@@ -596,7 +606,13 @@ class Worker:
                 m["tries"] = int(m.get("tries") or 1) + 1
                 keep.append(m)
                 stop = True  # ο server δεν απαντά ή ο κωδικός είναι λάθος: τα υπόλοιπα την επόμενη φορά
-            self.db.set_settings({"email_outbox": keep})
+        except BaseException:
+            keep += [m for m in box if m not in keep]
+            raise
+        finally:
+            with self._outbox_lock:
+                added = list(self.db.get_settings().get("email_outbox") or [])
+                self.db.set_settings({"email_outbox": (keep + added)[-50:]})
 
     def check_warranties(self, today=None):
         """Ειδοποίηση μία φορά όταν πλησιάζει η λήξη μιας εγγύησης."""

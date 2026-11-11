@@ -105,7 +105,7 @@ MIGRATIONS = {
     "categories": [("sector_id", "INTEGER REFERENCES sectors(id) ON DELETE SET NULL")],
     "shops": [("country", "TEXT")],
     "listings": [("last_price_eur", "REAL"), ("currency_override", "TEXT"), ("currency_asked", "INTEGER")],
-    "price_history": [("price_eur", "REAL"), ("source", "TEXT")],
+    "price_history": [("price_eur", "REAL"), ("source", "TEXT"), ("stock_known", "INTEGER")],
 }
 
 DEFAULT_SETTINGS = {
@@ -623,16 +623,16 @@ class Database:
             c.execute("DELETE FROM listings WHERE id=?", (listing_id,))
 
     def record_check(self, listing_id, price, currency, in_stock, title=None, screenshot=None, error=None,
-                     price_eur=None, source=None):
+                     price_eur=None, source=None, stock_known=None):
         ts = now_iso()
         if price_eur is None and price is not None and (currency or "").upper() == "EUR":
             price_eur = price
         with self.conn() as c:
             c.execute(
                 "INSERT INTO price_history(listing_id, checked_at, price, currency, in_stock, screenshot, error,"
-                " price_eur, source) VALUES(?,?,?,?,?,?,?,?,?)",
+                " price_eur, source, stock_known) VALUES(?,?,?,?,?,?,?,?,?,?)",
                 (listing_id, ts, price, currency, None if in_stock is None else int(in_stock), screenshot, error,
-                 price_eur, source),
+                 price_eur, source, None if stock_known is None else int(stock_known)),
             )
             if error:
                 c.execute("UPDATE listings SET last_checked=?, last_error=? WHERE id=?", (ts, error, listing_id))

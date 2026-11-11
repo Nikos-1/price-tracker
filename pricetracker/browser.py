@@ -84,7 +84,6 @@ class Browser:
     # Κοινό για όλους τους browsers της εφαρμογής: η απόσταση ανάμεσα σε δύο σελίδες του ίδιου καταστήματος
     # ισχύει και από εργασία σε εργασία (π.χ. έλεγχος και αμέσως μετά αναζήτηση)
     _last_host_time: dict[str, float] = {}
-    BLOCK_TYPES = {"font", "media"}  # οι εικόνες μένουν: το screenshot βγαίνει από την ίδια σελίδα
 
     def __init__(self, headless: bool = True, profile_dir: Path | None = None):
         self.headless = headless
@@ -103,7 +102,8 @@ class Browser:
     def _launch(self, opts: dict, user_agent: str | None):
         common = dict(
             headless=self.headless,
-            args=["--disable-blink-features=AutomationControlled"],
+            # Χωρίς αυτόματη αναπαραγωγή βίντεο/ήχου: λιγότερα δεδομένα στους ελέγχους
+            args=["--disable-blink-features=AutomationControlled", "--autoplay-policy=user-gesture-required"],
             locale="el-GR",
             timezone_id="Europe/Athens",
             viewport={"width": 1366, "height": 900},
@@ -154,20 +154,7 @@ class Browser:
             self._pw = None
             raise RuntimeError("Δεν βρέθηκε browser (Edge/Chrome). " + " | ".join(errors))
         self._context.add_init_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
-        try:  # λιγότερα δεδομένα και γρηγορότεροι έλεγχοι: χωρίς γραμματοσειρές και βίντεο
-            self._context.route("**/*", self._route)
-        except Exception:  # noqa: BLE001
-            log.debug("route failed", exc_info=True)
-
-    @classmethod
-    def _route(cls, route):
-        try:
-            if route.request.resource_type in cls.BLOCK_TYPES:
-                route.abort()
-            else:
-                route.continue_()
-        except Exception:  # noqa: BLE001
-            pass
+        # Χωρίς page.route: στο Playwright απενεργοποιεί την cache του browser, άρα θα έφερνε ΠΕΡΙΣΣΟΤΕΡΑ δεδομένα.
 
     def _close_context(self):
         ctx, self._context = self._context, None

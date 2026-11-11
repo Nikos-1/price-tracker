@@ -34,7 +34,7 @@ def test_move_db_never_overwrites_with_empty_db(tmp_path, monkeypatch):
     real_unlink = pathlib.Path.unlink
 
     def unlink(self, missing_ok=False):  # βοηθητικό αρχείο που δεν σβήνεται (π.χ. το κρατά το OneDrive)
-        if self.name.endswith("-journal"):
+        if self.name.endswith("-journal") and self.parent == src.parent:
             raise PermissionError("in use")
         return real_unlink(self, missing_ok=missing_ok)
 
@@ -96,17 +96,23 @@ def test_corrupt_old_documents_db_is_not_used(tmp_path):
     assert live == app / "pricetracker.db" and not (docs / "pricetracker.db").exists()
 
 
-def test_backup_written_by_another_computer_is_reported(tmp_path, monkeypatch):
-    import pytest
-
-    docs, app = tmp_path / "Docs", tmp_path / "App"
-    app.mkdir()
-    Database(app / "pricetracker.db").create_product("x")
+def test_two_computers_never_overwrite_each_others_backup(tmp_path, monkeypatch):
+    docs, a, b = tmp_path / "Docs", tmp_path / "A", tmp_path / "B"
+    a.mkdir()
+    b.mkdir()
+    Database(a / "pricetracker.db").create_product("από LAPTOP")
+    Database(b / "pricetracker.db").create_product("από DESKTOP")
     monkeypatch.setenv("COMPUTERNAME", "LAPTOP")
-    assert dbfile.backup_if_due(app / "pricetracker.db", docs, force=True)
+    assert dbfile.backup_if_due(a / "pricetracker.db", docs, force=True)
     monkeypatch.setenv("COMPUTERNAME", "DESKTOP")
-    with pytest.raises(RuntimeError, match="LAPTOP"):
-        dbfile.backup_if_due(app / "pricetracker.db", docs, force=True)
+    assert dbfile.backup_if_due(b / "pricetracker.db", docs, force=True)
+    shared, own = docs / dbfile.BACKUP_NAME, docs / "Αντίγραφο βάσης (DESKTOP).db"
+    assert Database(shared).list_products()[0]["name"] == "από LAPTOP"
+    assert Database(own).list_products()[0]["name"] == "από DESKTOP"
+    # Επαναφορά στο DESKTOP: από το δικό του αντίγραφο
+    (b / "pricetracker.db").unlink()
+    live, _ = dbfile.place_live_db(docs, b)
+    assert Database(live).list_products()[0]["name"] == "από DESKTOP"
 
 
 # ---------------------------------------------------------------- απόθεμα και τιμές (Ν4, Ν5, Ν16, Α4, Α6)

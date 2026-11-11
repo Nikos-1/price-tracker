@@ -221,14 +221,31 @@ NOT_PRODUCT = re.compile(r"(?:^|[\s_-])(?:related|similar|recommend\w*|carousel|
                          r"(?:$|[\s_-])", re.I)
 
 
-def _outside_product(el) -> bool:
+def _outside_product(el, stop=None) -> bool:
+    """True αν το στοιχείο βρίσκεται σε σχετικά προϊόντα, καρουζέλ, mini-cart, μενού κ.λπ. Ο έλεγχος σταματά
+    στην περιοχή του προϊόντος (stop) και δεν κοιτάζει ποτέ <body>/<html>, που συχνά έχουν κλάσεις διάταξης
+    όπως «has-sidebar»."""
     for a in [el] + list(el.parents):
-        if getattr(a, "name", None) in ("header", "footer", "nav", "aside"):
+        if a is stop or getattr(a, "name", None) in ("body", "html", "[document]", None):
+            return False
+        if a.name in ("header", "footer", "nav", "aside"):
             return True
         attrs = getattr(a, "attrs", None) or {}
         if NOT_PRODUCT.search(" ".join(attrs.get("class") or []) + " " + str(attrs.get("id") or "")):
             return True
     return False
+
+
+def _area_text(area) -> str:
+    """Το κείμενο της περιοχής του προϊόντος χωρίς σχετικά προϊόντα, καρουζέλ κ.λπ. μέσα της."""
+    import copy
+
+    el = copy.copy(area)
+    for x in list(el.find_all(True)):
+        if not x.decomposed and (x.name in ("header", "footer", "nav", "aside")
+                                 or NOT_PRODUCT.search(" ".join(x.get("class") or []) + " " + str(x.get("id") or ""))):
+            x.decompose()
+    return _text(el)
 
 
 def _product_area(soup):
@@ -241,15 +258,15 @@ def _product_area(soup):
 
 def availability_from_page(soup) -> bool | None:
     """Διαθεσιμότητα όταν δεν τη λέει η σελίδα με δομημένα δεδομένα. Ένα ενεργό κουμπί «στο καλάθι» του
-    ίδιου του προϊόντος μετράει περισσότερο από λέξεις. Κουμπιά και λέξεις σε σχετικά προϊόντα, καρουζέλ,
-    mini-cart, μενού και footer αγνοούνται."""
+    ίδιου του προϊόντος μετράει περισσότερο από λέξεις (π.χ. «Εξαντλήθηκε» για ένα άλλο μέγεθος). Κουμπιά και
+    λέξεις σε σχετικά προϊόντα, καρουζέλ, mini-cart, μενού και footer αγνοούνται."""
     area = _product_area(soup)
     scope = area if area is not None else soup
     disabled_cart = enabled_cart = False
     for b in scope.select("button, input[type=submit], a[class*=cart], a[class*=basket]"):
         label = " ".join([_text(b), str(b.get("value") or ""), str(b.get("aria-label") or ""),
                           str(b.get("title") or "")]).lower()
-        if not any(w in label for w in CART_WORDS) or _outside_product(b):
+        if not any(w in label for w in CART_WORDS) or _outside_product(b, stop=area):
             continue
         disabled = b.has_attr("disabled") or str(b.get("aria-disabled")).lower() == "true" \
             or "disabled" in " ".join(b.get("class") or []).lower()
@@ -257,22 +274,20 @@ def availability_from_page(soup) -> bool | None:
             disabled_cart = True
         else:
             enabled_cart = True
+    if enabled_cart:
+        return True
     if area is not None:
-        out, inn = _phrases_in(_text(area)[:8000])
-        if out and disabled_cart and not enabled_cart:  # «Εξαντλήθηκε» και ανενεργό κουμπί καλαθιού
-            return False
-        if enabled_cart and not out:
-            return True
-        if out and not enabled_cart:
+        out, inn = _phrases_in(_area_text(area)[:8000])
+        if out and (disabled_cart or not inn):  # «Εξαντλήθηκε» (και ανενεργό κουμπί καλαθιού)
             return False
         if out != inn:
             return inn
-        return None if out else (True if enabled_cart else None)
-    if enabled_cart and not disabled_cart:
-        return True
+        return None
     body = soup.body.get_text(" ") if soup.body else ""
     out, inn = _phrases_in(body[:20000])
-    if out != inn and not (inn and disabled_cart):  # μόνο όταν η σελίδα λέει καθαρά το ένα από τα δύο
+    if out and disabled_cart:
+        return False
+    if out != inn:  # μόνο όταν η σελίδα λέει καθαρά το ένα από τα δύο
         return inn
     return None
 

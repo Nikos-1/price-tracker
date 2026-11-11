@@ -636,7 +636,17 @@ function drawChart(p) {
   // Το γράφημα είναι σε €, ώστε να συγκρίνονται καταστήματα με διαφορετικό νόμισμα
   p.history.forEach((h) => { const y = h.price_eur ?? (h.currency === "EUR" ? h.price : null); if (y) (byListing[h.listing_id] ||= []).push({ x: new Date(h.checked_at.replace(" ", "T")).getTime(), y, s: h.in_stock }); });
   // Κάθε κατάστημα έχει πάντα το ίδιο χρώμα, σε όλα τα προϊόντα
-  const colorOf = (name) => { let h = 0; for (const ch of String(name)) h = (h * 31 + ch.codePointAt(0)) >>> 0; return COLORS[h % COLORS.length]; };
+  // (με τη «δική» του θέση στην παλέτα· αν δύο πέσουν στο ίδιο, ο δεύτερος παίρνει το επόμενο ελεύθερο)
+  const used = new Set();
+  const colorFor = {};
+  const colorOf = (name) => {
+    if (colorFor[name]) return colorFor[name];
+    let h = 0; for (const ch of String(name)) h = (h * 31 + ch.codePointAt(0)) >>> 0;
+    let i = h % COLORS.length;
+    for (let k = 0; k < COLORS.length && used.has(COLORS[i]); k++) i = (i + 1) % COLORS.length;
+    used.add(COLORS[i]);
+    return (colorFor[name] = COLORS[i]);
+  };
   const datasets = p.listings.filter((l) => byListing[l.id]).map((l) => ({
     label: `${l.shop_name} (${l.region_label})`, data: byListing[l.id], borderColor: colorOf(l.shop_name),
     backgroundColor: colorOf(l.shop_name), stepped: true, pointRadius: 2, borderWidth: 2,
