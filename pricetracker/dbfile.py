@@ -78,16 +78,35 @@ def copy_db(src: Path, dst: Path):
             s.close()
         if not is_ok(tmp):
             raise sqlite3.DatabaseError("Το αντίγραφο της βάσης δεν πέρασε τον έλεγχο")
-        for f in _files(dst)[1:]:  # βοηθητικά αρχεία (-wal/-shm) της ΠΑΛΙΑΣ βάσης δεν πρέπει να «παιχτούν» στη νέα
-            f.unlink(missing_ok=True)
-        for attempt in range(3):  # το OneDrive μπορεί να κρατά για λίγο το παλιό αντίγραφο
+        # Βοηθητικά αρχεία (-wal/-shm) της ΠΑΛΙΑΣ βάσης δεν πρέπει να «παιχτούν» στη νέα. Παραμερίζονται και
+        # επιστρέφουν στη θέση τους αν η αντικατάσταση αποτύχει, ώστε η παλιά να μείνει ακέραιη.
+        stale = []
+        for f in _files(dst)[1:]:
+            if f.exists():
+                g = f.with_name(f.name + ".stale")
+                os.replace(f, g)
+                stale.append((f, g))
+        try:
+            for attempt in range(3):  # το OneDrive μπορεί να κρατά για λίγο το παλιό αντίγραφο
+                try:
+                    os.replace(tmp, dst)
+                    break
+                except PermissionError:
+                    if attempt == 2:
+                        raise
+                    time.sleep(1)
+        except BaseException:
+            for f, g in stale:
+                try:
+                    os.replace(g, f)
+                except OSError:
+                    pass
+            raise
+        for _, g in stale:
             try:
-                os.replace(tmp, dst)
-                break
-            except PermissionError:
-                if attempt == 2:
-                    raise
-                time.sleep(1)
+                g.unlink(missing_ok=True)
+            except OSError:
+                pass
     finally:
         try:
             tmp.unlink(missing_ok=True)  # να μη μένουν .tmp στο OneDrive
@@ -151,6 +170,7 @@ def place_live_db(data_dir: Path, app_dir: Path) -> tuple[Path, list[str]]:
     app_dir.mkdir(parents=True, exist_ok=True)
     stamp = f"{datetime.now():%Y%m%d-%H%M%S}"
     live, old = app_dir / LIVE_NAME, data_dir / LIVE_NAME
+    live_ok = None  # αποτέλεσμα του is_ok(live), ώστε να μη γίνεται δύο φορές ο (αργός) έλεγχος
     if old.exists():  # από v0.8.x: η βάση ήταν στα Έγγραφα
         if not is_ok(old):
             # Χαλασμένη παλιά βάση στα Έγγραφα: δεν τη χρησιμοποιούμε, κρατιέται για κάθε ενδεχόμενο
@@ -162,28 +182,36 @@ def place_live_db(data_dir: Path, app_dir: Path) -> tuple[Path, list[str]]:
                 events.append(f"η παλιά βάση των Εγγράφων ήταν χαλασμένη, κρατήθηκε ως {bad.name}")
             except OSError as e:
                 log.warning("Δεν μετακινήθηκε η χαλασμένη βάση %s: %s", old, e)
-        elif live.exists() and is_ok(live) and live.stat().st_mtime >= old.stat().st_mtime:
+        elif live.exists() and (live_ok := is_ok(live)) and live.stat().st_mtime >= old.stat().st_mtime:
             # Η τοπική είναι νεότερη (και σωστή): η παλιά των Εγγράφων κρατιέται τοπικά μόνο ως παλιό αντίγραφο
             if _move_db(old, app_dir / f"pricetracker-παλιά-από-Έγγραφα-{stamp}.db"):
                 events.append("παλιά βάση Εγγράφων → AppData (παλιό αντίγραφο)")
         else:
             if live.exists():
-                if is_ok(live):
+                if live_ok if live_ok is not None else is_ok(live):
                     if not _move_db(live, app_dir / f"pricetracker-παλιότερη-{stamp}.db"):
                         return live, events  # δεν κρατήθηκε αντίγραφο της τοπικής: δεν την αντικαθιστούμε
                 elif _set_aside(live, app_dir / f"pricetracker-χαλασμένη-{stamp}.db"):
-                    events.append(f"η τοπική βάση ήταν χαλασμένη, κρατήθηκε ως pricetracker-χαλασμένη-{stamp}.db")
+                    events.append(f"{PROBLEM_PREFIX}Η τοπική βάση είχε χαλάσει (κρατήθηκε ως «pricetracker-χαλασμένη-"
+                                  f"{stamp}.db») και ξεκίνησε από τη βάση των Εγγράφων, όπως ήταν πριν την "
+                                  "αναβάθμιση. Ό,τι άλλαξε μετά από τότε δεν υπάρχει.")
                 else:
                     return old, events  # η χαλασμένη τοπική δεν μετακινείται: συνεχίζει με τη σωστή των Εγγράφων
             if _move_db(old, live):
                 events.append("βάση Εγγράφων → AppData")
+                live_ok = True  # το copy_db ήδη έλεγξε το νέο αρχείο
             elif live.exists():
                 return live, events
             else:
                 return old, events  # δεν μεταφέρθηκε: συνεχίζει από τα Έγγραφα, ξαναδοκιμάζει την επόμενη φορά
     own = backup_path(data_dir)
-    backup = own if own.exists() else data_dir / BACKUP_NAME
-    if live.exists() and not is_ok(live):
+    shared = data_dir / BACKUP_NAME
+    # Επαναφορά μόνο από αντίγραφο ΑΥΤΟΥ του υπολογιστή (ή χωρίς ένδειξη υπολογιστή, από παλιότερη έκδοση)
+    other = "" if own.exists() else _backup_computer(shared)
+    backup = own if own.exists() else shared
+    if live.exists() and live_ok is None:
+        live_ok = is_ok(live)
+    if live.exists() and not live_ok:
         bad = app_dir / f"pricetracker-χαλασμένη-{stamp}.db"
         if _set_aside(live, bad):
             events.append(f"{PROBLEM_PREFIX}Η βάση είχε χαλάσει και κρατήθηκε ως «{bad.name}» στο {app_dir}.")
@@ -192,7 +220,10 @@ def place_live_db(data_dir: Path, app_dir: Path) -> tuple[Path, list[str]]:
                           "Κλείσε την εφαρμογή, κάνε επανεκκίνηση του υπολογιστή και ξανάνοιξέ την.")
             return live, events
     if not live.exists():
-        if backup.exists() and is_ok(backup):
+        if other and _computer() and other != _computer() and backup.exists():
+            events.append(f"{PROBLEM_PREFIX}Η βάση δεν βρέθηκε. Το «{backup.name}» είναι του υπολογιστή «{other}», "
+                          "γι' αυτό δεν έγινε αυτόματη επαναφορά. Η εφαρμογή ξεκίνησε με κενή βάση.")
+        elif backup.exists() and is_ok(backup):
             try:
                 copy_db(backup, live)
                 when = datetime.fromtimestamp(backup.stat().st_mtime).strftime("%d/%m/%Y %H:%M")

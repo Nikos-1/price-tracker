@@ -468,3 +468,33 @@ def test_screenshot_only_when_available_and_replaces_unavailable_one(tmp_path, m
     assert counts == [0, 0, 1, 1, 1, 2]
     assert not old.exists() and "Προϊόντα/old.jpg" not in db.product_screenshots(pid)
     assert db.get_listing(lid)["last_screenshot"] and db.get_listing(lid)["last_screenshot"] != "Προϊόντα/old.jpg"
+
+
+def test_outbox_stays_in_db_while_sending(tmp_path, monkeypatch):
+    db, w = _email_worker(tmp_path)
+    monkeypatch.setattr(notifier, "load_password", lambda *a, **k: "pw")
+    db.set_settings({"email_outbox": [{"subject": "α", "text": "t", "ts": time.time(), "tries": 1}]})
+    seen = []
+    monkeypatch.setattr(notifier, "send_email",
+                        lambda *a, **k: seen.append(len(db.get_settings()["email_outbox"])))
+    w.retry_outbox(force=True)
+    assert seen == [1] and db.get_settings()["email_outbox"] == []
+
+
+def test_no_silent_restore_from_another_computers_backup(tmp_path, monkeypatch):
+    docs, a, b = tmp_path / "Docs", tmp_path / "A", tmp_path / "B"
+    a.mkdir()
+    b.mkdir()
+    Database(a / "pricetracker.db").create_product("από LAPTOP")
+    monkeypatch.setenv("COMPUTERNAME", "LAPTOP")
+    dbfile.backup_if_due(a / "pricetracker.db", docs, force=True)
+    monkeypatch.setenv("COMPUTERNAME", "DESKTOP")
+    live, events = dbfile.place_live_db(docs, b)
+    assert not live.exists() and any("LAPTOP" in p for p in dbfile.problems(events))
+
+
+def test_availability_inside_product_sidebar_is_read():
+    html = """<html><body class="has-sidebar"><main class="product-page"><h1>Ψυγείο</h1>
+      <div class="product-sidebar"><span class="price">499,00 €</span><p>Εξαντλήθηκε</p>
+      <button class="add-to-cart" disabled>Προσθήκη στο καλάθι</button></div></main></body></html>"""
+    assert extract(html, "https://shop.gr/p").in_stock is False

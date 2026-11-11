@@ -66,6 +66,10 @@ def _detect_tried(settings) -> dict[str, float]:
     return {k: float(t or 0) for k, t in v.items()}
 
 
+def _outbox_key(m: dict):
+    return (m.get("ts"), m.get("subject"))
+
+
 class Worker:
     def __init__(self, db, data_dir: Path, notify_callback=None, app_dir: Path | None = None):
         self.db = db
@@ -398,8 +402,7 @@ class Worker:
                 when = datetime.now().strftime("%d/%m/%Y %H:%M")
                 path = (productdirs.product_dir(self.db, self.data_dir, product) /
                         f"{datetime.now():%Y%m%d_%H%M%S}_{_slug(l.get('shop_name') or 'shop', 20)}.jpg")
-                price_txt = (fx.fmt_with_eur(info.price, info.currency, fx.to_eur(info.price, info.currency, self._fx()))
-                             + ("" if in_stock else " (μη διαθέσιμο)"))
+                price_txt = fx.fmt_with_eur(info.price, info.currency, fx.to_eur(info.price, info.currency, self._fx()))
                 shop_txt = f"{l.get('shop_name') or ''} · {host_of(res.final_url)}"
                 try:
                     br.screenshot(page, path, shop_txt, info.title or product["name"], price_txt, when)
@@ -592,38 +595,34 @@ class Worker:
         if not force and time.time() - getattr(self, "_last_outbox_try", 0) < 900:
             return
         self._last_outbox_try = time.time()
-        # Η ουρά «παραλαμβάνεται» κάτω από το lock και στέλνεται ΕΚΤΟΣ lock (ένα αργό SMTP δεν σταματά τους
-        # ελέγχους). Όσα email αποτύχουν στο μεταξύ μπαίνουν στην ουρά και κρατιούνται στο τέλος.
+        # Τα μηνύματα μένουν στη βάση όσο στέλνονται (ένα κλείσιμο της εφαρμογής δεν τα χάνει). Η αποστολή
+        # γίνεται ΕΚΤΟΣ lock, ώστε ένα αργό SMTP να μη σταματά τους ελέγχους· στο τέλος, κάτω από το lock,
+        # αφαιρούνται μόνο όσα στάλθηκαν/απορρίφθηκαν και κρατιούνται όσα μπήκαν στο μεταξύ.
         with self._outbox_lock:
             box = list(self.db.get_settings().get("email_outbox") or [])
-            self.db.set_settings({"email_outbox": []})
-        keep = []
-        stop = False
-        try:
-            for m in box:
-                if stop:
-                    keep.append(m)
+        done: set = set()
+        updated: dict = {}
+        for m in box:
+            k = _outbox_key(m)
+            if time.time() - float(m.get("ts") or 0) > OUTBOX_MAX_AGE_H * 3600:
+                self._log(f"Το email «{m.get('subject')}» δεν στάλθηκε μέσα σε 48 ώρες και διαγράφηκε")
+                done.add(k)
+                continue
+            try:
+                self._send_now(settings, m["subject"], m["text"], m.get("body"), m.get("attachments"))
+                done.add(k)
+                continue
+            except Exception as e:  # noqa: BLE001
+                if self._email_failed(e):
+                    self._log(f"Το email «{m.get('subject')}» απορρίφθηκε από τον server και διαγράφηκε")
+                    done.add(k)
                     continue
-                if time.time() - float(m.get("ts") or 0) > OUTBOX_MAX_AGE_H * 3600:
-                    self._log(f"Το email «{m.get('subject')}» δεν στάλθηκε μέσα σε 48 ώρες και διαγράφηκε")
-                    continue
-                try:
-                    self._send_now(settings, m["subject"], m["text"], m.get("body"), m.get("attachments"))
-                    continue
-                except Exception as e:  # noqa: BLE001
-                    if self._email_failed(e):
-                        self._log(f"Το email «{m.get('subject')}» απορρίφθηκε από τον server και διαγράφηκε")
-                        continue
-                m["tries"] = int(m.get("tries") or 1) + 1
-                keep.append(m)
-                stop = True  # ο server δεν απαντά ή ο κωδικός είναι λάθος: τα υπόλοιπα την επόμενη φορά
-        except BaseException:
-            keep += [m for m in box if m not in keep]
-            raise
-        finally:
-            with self._outbox_lock:
-                added = list(self.db.get_settings().get("email_outbox") or [])
-                self.db.set_settings({"email_outbox": (keep + added)[-50:]})
+            updated[k] = {**m, "tries": int(m.get("tries") or 1) + 1}
+            break  # ο server δεν απαντά ή ο κωδικός είναι λάθος: τα υπόλοιπα την επόμενη φορά
+        with self._outbox_lock:
+            cur = list(self.db.get_settings().get("email_outbox") or [])
+            out = [updated.get(_outbox_key(m), m) for m in cur if _outbox_key(m) not in done]
+            self.db.set_settings({"email_outbox": out[-50:]})
 
     def check_warranties(self, today=None):
         """Ειδοποίηση μία φορά όταν πλησιάζει η λήξη μιας εγγύησης."""

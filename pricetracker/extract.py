@@ -221,6 +221,12 @@ NOT_PRODUCT = re.compile(r"(?:^|[\s_-])(?:related|similar|recommend\w*|carousel|
                          r"(?:$|[\s_-])", re.I)
 
 
+# Μέσα στην περιοχή του προϊόντος μετράνε μόνο τα καθαρά «άλλα προϊόντα»: ένα «product-sidebar» ή
+# «product-info-header» είναι συχνά ακριβώς εκεί που γράφει τιμή, διαθεσιμότητα και κουμπί καλαθιού.
+NOT_PRODUCT_INNER = re.compile(r"(?:^|[\s_-])(?:related|similar|recommend\w*|carousel|slider|swiper|upsell|cross-?sell"
+                               r"|also-?bought|recently|minicart|mini-cart|cart-drawer)(?:$|[\s_-])", re.I)
+
+
 def _outside_product(el, stop=None) -> bool:
     """True αν το στοιχείο βρίσκεται σε σχετικά προϊόντα, καρουζέλ, mini-cart, μενού κ.λπ. Ο έλεγχος σταματά
     στην περιοχή του προϊόντος (stop) και δεν κοιτάζει ποτέ <body>/<html>, που συχνά έχουν κλάσεις διάταξης
@@ -228,10 +234,11 @@ def _outside_product(el, stop=None) -> bool:
     for a in [el] + list(el.parents):
         if a is stop or getattr(a, "name", None) in ("body", "html", "[document]", None):
             return False
-        if a.name in ("header", "footer", "nav", "aside"):
+        if a.name in ("header", "footer", "nav") or (a.name == "aside" and stop is None):
             return True
         attrs = getattr(a, "attrs", None) or {}
-        if NOT_PRODUCT.search(" ".join(attrs.get("class") or []) + " " + str(attrs.get("id") or "")):
+        pat = NOT_PRODUCT_INNER if stop is not None else NOT_PRODUCT
+        if pat.search(" ".join(attrs.get("class") or []) + " " + str(attrs.get("id") or "")):
             return True
     return False
 
@@ -242,8 +249,8 @@ def _area_text(area) -> str:
 
     el = copy.copy(area)
     for x in list(el.find_all(True)):
-        if not x.decomposed and (x.name in ("header", "footer", "nav", "aside")
-                                 or NOT_PRODUCT.search(" ".join(x.get("class") or []) + " " + str(x.get("id") or ""))):
+        if not x.decomposed and (x.name in ("footer", "nav")
+                                 or NOT_PRODUCT_INNER.search(" ".join(x.get("class") or []) + " " + str(x.get("id") or ""))):
             x.decompose()
     return _text(el)
 
@@ -274,12 +281,12 @@ def availability_from_page(soup) -> bool | None:
             disabled_cart = True
         else:
             enabled_cart = True
-    if enabled_cart:
+    if enabled_cart and not disabled_cart:
         return True
     if area is not None:
         out, inn = _phrases_in(_area_text(area)[:8000])
-        if out and (disabled_cart or not inn):  # «Εξαντλήθηκε» (και ανενεργό κουμπί καλαθιού)
-            return False
+        if out and (disabled_cart or not inn) and not (enabled_cart and not disabled_cart):
+            return False  # «Εξαντλήθηκε» (και ανενεργό κουμπί καλαθιού)
         if out != inn:
             return inn
         return None
