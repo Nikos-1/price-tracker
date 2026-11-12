@@ -502,6 +502,40 @@ async function addProduct() {
 
 // ---------------------------------------------------------------- λεπτομέρειες προϊόντος
 let chart;
+// Καταστήματα που διάβασε η εφαρμογή από σελίδα σύγκρισης τιμών (Skroutz, BestPrice), κάτω από τη γραμμή της
+function offersRow(l) {
+  const offers = l.offers || [];
+  if (!offers.length) return "";
+  const avail = offers.filter((o) => o.in_stock === 1 || o.in_stock === true).length;
+  const change = (o) => {
+    if (o.price_eur == null || o.prev_price_eur == null || Math.abs(o.price_eur - o.prev_price_eur) < 0.005) return "";
+    const d = o.price_eur - o.prev_price_eur;
+    return `<span class="${d < 0 ? "chg-down" : "chg-up"}" title="Από ${eur(o.prev_price_eur)}">${d < 0 ? "▼" : "▲"} ${eur(Math.abs(d))}</span>`;
+  };
+  return `<tr class="offers-row"><td colspan="8"><details${offers.length <= 8 ? " open" : ""}>
+    <summary>Καταστήματα στο ${esc(l.shop_name)}: ${offers.length} (${avail} διαθέσιμα)</summary>
+    <table class="offers">
+      <tr><th>Κατάστημα</th><th>Τιμή</th><th>Διαθέσιμο</th><th>Αλλαγή</th><th>Χαμηλότερη</th><th></th></tr>
+      ${offers.map((o) => `<tr class="${o.in_stock === 0 || o.in_stock === false ? "unavail" : ""}">
+        <td>${/^https?:\/\//i.test(o.url || "") ? `<a href="${esc(o.url)}" target="_blank" rel="noopener">${esc(o.shop)}</a>` : esc(o.shop)}</td>
+        <td class="num">${money(o.price, o.currency, o.price_eur)}</td>
+        <td>${o.in_stock == null ? "–" : o.in_stock ? '<span class="chip ok">Ναι</span>' : '<span class="chip bad">Όχι</span>'}</td>
+        <td class="num">${change(o)}</td>
+        <td class="num">${eur(o.min_price_eur)}</td>
+        <td><button class="small" data-offer-hist="${l.id}" data-shop="${esc(o.shop)}" title="Ιστορικό τιμών">Ιστορικό</button></td></tr>`).join("")}
+    </table><p class="hint">Τιμές όπως τις δείχνει το ${esc(l.shop_name)}. Η γραμμή από πάνω κρατά τη φθηνότερη διαθέσιμη.</p></details></td></tr>`;
+}
+
+async function showOfferHistory(lid, shop) {
+  const rows = await api("GET", `/api/listings/${lid}/offers?shop=${encodeURIComponent(shop)}`);
+  const body = rows.length ? `<table class="offers"><tr><th>Έλεγχος</th><th>Τιμή</th><th>Διαθέσιμο</th></tr>
+    ${rows.slice(-60).reverse().map((h) => `<tr class="${h.in_stock === 0 ? "unavail" : ""}"><td>${fmtDate(h.checked_at)}</td>
+      <td class="num">${money(h.price, h.currency, h.price_eur)}</td>
+      <td>${h.in_stock == null ? "–" : h.in_stock ? "Ναι" : "Όχι"}</td></tr>`).join("")}</table>`
+    : `<p class="hint">Δεν υπάρχει ιστορικό.</p>`;
+  modal(`<h2>Ιστορικό: ${esc(shop)}</h2>${body}<div class="btns"><button class="primary" data-close>Κλείσιμο</button></div>`);
+}
+
 async function openProduct(id) {
   state.view = "detail"; state.productId = id;
   await renderDetail();
@@ -523,7 +557,7 @@ async function renderDetail() {
       <td class="col-shot">${l.last_screenshot ? `<img class="thumb" src="/shots/${encodeURI(l.last_screenshot.replaceAll("\\", "/"))}" data-shot="${esc(l.last_screenshot)}" alt="screenshot">` : "–"}</td>
       <td class="num col-checked">${fmtDate(l.last_checked)}</td>
       <td style="white-space:nowrap"><button class="small" data-check-l="${l.id}" title="Έλεγχος τώρα">⟳</button>
-          <button class="small danger" data-del-l="${l.id}" title="Αφαίρεση καταστήματος">✕</button></td></tr>`).join("");
+          <button class="small danger" data-del-l="${l.id}" title="Αφαίρεση καταστήματος">✕</button></td></tr>${offersRow(l)}`).join("");
   const table = (title, arr) => arr.length ? `<div class="section"><h3>${title}</h3><table>
       <tr><th>Κατάστημα</th><th>Τιμή</th><th>Διαθέσιμο</th><th>Χαμηλότερη 30 ημ.</th><th>Εκτίμηση προσφοράς</th><th class="col-shot">Screenshot</th><th class="col-checked">Έλεγχος</th><th></th></tr>
       ${listingRows(arr)}</table></div>` : "";
@@ -596,6 +630,7 @@ async function renderDetail() {
     }
   });
   main.querySelectorAll("[data-shot]").forEach((el) => el.onclick = () => showShot(el.dataset.shot));
+  main.querySelectorAll("[data-offer-hist]").forEach((b) => b.onclick = () => run(() => showOfferHistory(b.dataset.offerHist, b.dataset.shop)));
   drawChart(p);
 }
 function addLink(pid) {

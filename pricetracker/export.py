@@ -62,8 +62,9 @@ def export_xlsx(db, data_dir: Path, out_path: Path, product_ids: list[int] | Non
     hist_ws = wb.create_sheet("Ιστορικό")
     _header(hist_ws, ["Ημερομηνία", "Προϊόν", "Κατηγορία", "Κατάστημα", "Περιοχή", "Τιμή", "Νόμισμα", "Τιμή σε €",
                       "Διαθέσιμο", "Σφάλμα", "Screenshot", "Link"])
-    used = {"Σύνοψη", "Ιστορικό"}
+    used = {"Σύνοψη", "Ιστορικό", "Skroutz-BestPrice"}
     rates = db.get_settings().get("fx") or {}
+    offers_ws = None  # φτιάχνεται μόνο αν υπάρχουν καταστήματα από Skroutz / BestPrice
 
     def eur_of(price, cur, stored):
         return stored if stored is not None else fx.to_eur(price, cur, rates)
@@ -93,6 +94,16 @@ def export_xlsx(db, data_dir: Path, out_path: Path, product_ids: list[int] | Non
                     cell.hyperlink = (Path(data_dir) / r["screenshot"]).as_uri()
                     cell.font = Font(color="2563EB", underline="single")
                 hist_ws.cell(hist_ws.max_row, 1).number_format = "dd/mm/yyyy hh:mm"
+            for o in db.offers(l["id"]):
+                if offers_ws is None:
+                    offers_ws = wb.create_sheet("Skroutz-BestPrice", 2)
+                    _header(offers_ws, ["Ημερομηνία", "Προϊόν", "Σελίδα σύγκρισης", "Κατάστημα", "Τιμή", "Νόμισμα",
+                                        "Τιμή σε €", "Διαθέσιμο", "Link"])
+                offers_ws.append([datetime.fromisoformat(o["checked_at"]), p["name"], l.get("shop_name"), o["shop"],
+                                  o["price"], o["currency"], o["price_eur"],
+                                  None if o["in_stock"] is None else ("Ναι" if o["in_stock"] else "Όχι"),
+                                  o["url"] or ""])
+                offers_ws.cell(offers_ws.max_row, 1).number_format = "dd/mm/yyyy hh:mm"
         _product_sheet(wb, db, p, listings, used)
     purchased = [p for p in db.list_purchased() if not product_ids or p["id"] in product_ids]
     if purchased:
@@ -114,7 +125,7 @@ def export_xlsx(db, data_dir: Path, out_path: Path, product_ids: list[int] | Non
             for c in row:
                 if isinstance(c.value, float):
                     c.number_format = "#,##0.00 €"
-    for sheet in (ws, hist_ws):
+    for sheet in [x for x in (ws, hist_ws, offers_ws) if x is not None]:
         _autowidth(sheet)
         for row in sheet.iter_rows(min_row=2):
             for c in row:

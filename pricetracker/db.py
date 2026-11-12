@@ -68,6 +68,22 @@ CREATE TABLE IF NOT EXISTS price_history (
     error TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_history_listing ON price_history(listing_id, checked_at);
+-- Καταστήματα που διαβάστηκαν από σελίδα σύγκρισης τιμών (Skroutz, BestPrice) σε κάθε έλεγχο
+CREATE TABLE IF NOT EXISTS listing_offers (
+    id INTEGER PRIMARY KEY,
+    listing_id INTEGER NOT NULL REFERENCES listings(id) ON DELETE CASCADE,
+    history_id INTEGER REFERENCES price_history(id) ON DELETE CASCADE,  -- ο έλεγχος στον οποίο ανήκει
+    checked_at TEXT NOT NULL,
+    shop TEXT NOT NULL,
+    shop_key TEXT NOT NULL,  -- όνομα χωρίς διάκριση πεζών/κεφαλαίων (και ελληνικών), για το ιστορικό ανά κατάστημα
+    url TEXT,
+    price REAL,
+    currency TEXT,
+    price_eur REAL,
+    in_stock INTEGER
+);
+CREATE INDEX IF NOT EXISTS ix_offers_listing ON listing_offers(listing_id, history_id);
+CREATE INDEX IF NOT EXISTS ix_offers_shop ON listing_offers(listing_id, shop_key, history_id);
 CREATE TABLE IF NOT EXISTS alerts_sent (
     listing_id INTEGER NOT NULL REFERENCES listings(id) ON DELETE CASCADE,
     kind TEXT NOT NULL,
@@ -132,6 +148,15 @@ DEFAULT_SETTINGS = {
     "research_daily": True,          # μία φορά τη μέρα αναζήτηση στα καταστήματα που δεν έχουν το προϊόν
     "notify_new_shop": True,
 }
+
+
+def shop_key(name) -> str:
+    """Το όνομα ενός καταστήματος χωρίς διάκριση πεζών/κεφαλαίων και κενών («PUBLIC» = «Public»,
+    «ΚΑΤΑΣΤΗΜΑ» = «Κατάστημα»), για να μη χωρίζεται το ιστορικό του."""
+    import unicodedata
+
+    s = unicodedata.normalize("NFD", " ".join(str(name or "").split()).casefold())
+    return "".join(ch for ch in s if not unicodedata.combining(ch))  # και χωρίς τόνους: «Ά» = «α»
 
 
 def now_iso() -> str:
@@ -626,6 +651,7 @@ class Database:
     def clear_history(self, listing_id: int):
         with self.conn() as c:
             c.execute("DELETE FROM price_history WHERE listing_id=?", (listing_id,))
+            c.execute("DELETE FROM listing_offers WHERE listing_id=?", (listing_id,))
             c.execute("UPDATE listings SET last_price=NULL, last_currency=NULL, last_in_stock=NULL, last_checked=NULL,"
                       " last_error=NULL, last_screenshot=NULL, last_price_eur=NULL WHERE id=?", (listing_id,))
 
@@ -638,12 +664,14 @@ class Database:
             c.execute("DELETE FROM listings WHERE id=?", (listing_id,))
 
     def record_check(self, listing_id, price, currency, in_stock, title=None, screenshot=None, error=None,
-                     price_eur=None, source=None, stock_known=None):
+                     price_eur=None, source=None, stock_known=None, offers=None):
+        """offers: καταστήματα από σελίδα σύγκρισης τιμών, λίστα από dict με shop, url, price, currency,
+        price_eur, in_stock. Αποθηκεύονται με την ίδια ώρα ελέγχου."""
         ts = now_iso()
         if price_eur is None and price is not None and (currency or "").upper() == "EUR":
             price_eur = price
         with self.conn() as c:
-            c.execute(
+            cur = c.execute(
                 "INSERT INTO price_history(listing_id, checked_at, price, currency, in_stock, screenshot, error,"
                 " price_eur, source, stock_known) VALUES(?,?,?,?,?,?,?,?,?,?)",
                 (listing_id, ts, price, currency, None if in_stock is None else int(in_stock), screenshot, error,
@@ -659,7 +687,49 @@ class Database:
                     (price, currency, None if in_stock is None else int(in_stock), ts, title, screenshot,
                      price_eur, listing_id),
                 )
+                if offers:
+                    c.executemany(
+                        "INSERT INTO listing_offers(listing_id, history_id, checked_at, shop, shop_key, url, price,"
+                        " currency, price_eur, in_stock) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                        [(listing_id, cur.lastrowid, ts, o["shop"], shop_key(o["shop"]), o.get("url"), o.get("price"), o.get("currency"),
+                          o.get("price_eur"), None if o.get("in_stock") is None else int(o["in_stock"]))
+                         for o in offers])
         return ts
+
+    def latest_offers(self, listing_id: int) -> list[dict]:
+        """Τα καταστήματα του τελευταίου επιτυχημένου ελέγχου, μαζί με την προηγούμενη τιμή του καθενός και τη
+        χαμηλότερη που έχει δει η εφαρμογή. Αν ο τελευταίος έλεγχος δεν έδωσε λίστα, δεν δείχνεται παλιά λίστα
+        ως τρέχουσα. Σειρά: διαθέσιμα από το φθηνότερο, άγνωστα, μη διαθέσιμα."""
+        with self.conn() as c:
+            last = c.execute("SELECT MAX(id) FROM price_history WHERE listing_id=? AND error IS NULL",
+                             (listing_id,)).fetchone()[0]
+            if last is None:
+                return []
+            # Με το ευρετήριο (listing_id, shop_key, history_id) κάθε υποερώτημα διαβάζει μόνο ένα κατάστημα
+            rows = [dict(x) for x in c.execute(
+                """SELECT o.shop, o.url, o.price, o.currency, o.price_eur, o.in_stock, o.checked_at,
+                          (SELECT p.price_eur FROM listing_offers p WHERE p.listing_id=o.listing_id
+                             AND p.shop_key=o.shop_key AND p.history_id<o.history_id AND p.price_eur IS NOT NULL
+                             ORDER BY p.history_id DESC LIMIT 1) AS prev_price_eur,
+                          (SELECT MIN(m.price_eur) FROM listing_offers m WHERE m.listing_id=o.listing_id
+                             AND m.shop_key=o.shop_key) AS min_price_eur
+                   FROM listing_offers o WHERE o.listing_id=? AND o.history_id=?""", (listing_id, last))]
+        rank = {1: 0, None: 1, 0: 2}
+        rows.sort(key=lambda o: (rank.get(o["in_stock"], 1),
+                                 o["price_eur"] if o["price_eur"] is not None else 1e18, o["shop"].lower()))
+        return rows
+
+    def offers(self, listing_id: int, shop: str | None = None) -> list[dict]:
+        """Όλο το ιστορικό καταστημάτων μιας σελίδας σύγκρισης τιμών, ή ενός καταστήματος (χωρίς διάκριση
+        κεφαλαίων/πεζών στο όνομα)."""
+        q = ("SELECT checked_at, shop, url, price, currency, price_eur, in_stock FROM listing_offers"
+             " WHERE listing_id=?")
+        args = [listing_id]
+        if shop is not None:
+            q += " AND shop_key=?"
+            args.append(shop_key(shop))
+        with self.conn() as c:
+            return [dict(x) for x in c.execute(q + " ORDER BY history_id, shop", args)]
 
     # ---------- ειδοποιήσεις που στάλθηκαν (για να μη στέλνεται η ίδια ξανά και ξανά) ----------
     def last_alert(self, listing_id: int, kind: str):

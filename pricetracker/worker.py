@@ -381,7 +381,11 @@ class Worker:
             stock_known = info.in_stock is not None
             in_stock = info.in_stock if stock_known else (info.price is not None)
             # Νόμισμα: αυτό που διάλεξε ο χρήστης (υπερισχύει), αλλιώς από τη σελίδα, αλλιώς από τη χώρα του καταστήματος
-            info.currency = l.get("currency_override") or info.currency or currency_of_country(l.get("country"))
+            if getattr(info, "offers", None):
+                # σελίδα σύγκρισης τιμών: η τιμή της γραμμής είναι η φθηνότερη από τη λίστα, με το δικό της νόμισμα
+                info.currency = info.currency or currency_of_country(l.get("country"))
+            else:
+                info.currency = l.get("currency_override") or info.currency or currency_of_country(l.get("country"))
             if info.price is not None and not info.currency:
                 self._ask_currency(l, product)
             shot = None
@@ -423,9 +427,12 @@ class Worker:
         if src and last_src and src != last_src:
             # π.χ. από JSON-LD σε «γενική ανάγνωση»: πιθανή αλλαγή στη σελίδα του καταστήματος, αξίζει έλεγχο
             self._log(f"{l.get('shop_name')}: η τιμή διαβάστηκε αλλιώς ({last_src} → {src}), έλεγξέ την")
+        offers = [{**o, "currency": o.get("currency") or "EUR",
+                   "price_eur": fx.to_eur(o.get("price"), o.get("currency") or "EUR", self._fx())}
+                  for o in (getattr(info, "offers", None) or [])]
         try:
             self.db.record_check(l["id"], info.price, info.currency, in_stock, title=info.title, screenshot=shot,
-                                 price_eur=price_eur, source=src, stock_known=stock_known)
+                                 price_eur=price_eur, source=src, stock_known=stock_known, offers=offers)
         except Exception:
             if shot:  # η σελίδα/το προϊόν διαγράφηκε στο μεταξύ: να μη μείνει ορφανό screenshot
                 productdirs.remove_tree(self.data_dir / shot)
