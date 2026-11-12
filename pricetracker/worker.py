@@ -810,9 +810,10 @@ class Worker:
         shops = self.search_shops(product_id, have_shops)
         if not shops:
             return []
+        # Το πολύ 3 αναζητήσεις ανά κατάστημα (κάθε μία είναι ολόκληρη σελίδα): όσα δεν έχουν το προϊόν τις
+        # περνούν όλες, και περισσότερες σημαίνουν αργή αναζήτηση και μπλοκαρίσματα
         queries = build_queries(title, product.get("ean"), product.get("mpn"), product.get("brand"))
-        if product.get("ean"):
-            queries.append(product["ean"])
+        queries = queries[:2] + [product["ean"]] if product.get("ean") else queries[:3]
         query = queries[0]
         self.status.update(task=(f"{label}: " if label else "") + f"Αναζήτηση «{query}»", progress=0,
                            total=len(shops))
@@ -826,7 +827,7 @@ class Worker:
                 self.status["progress"] = i
                 try:
                     cands = []
-                    broken = False
+                    homes = 0
                     # Πρώτα «μάρκα + μοντέλο», μετά ο τίτλος, μετά το EAN: σταματά στην πρώτη που βρίσκει κάτι
                     for q in queries:
                         page, res = br.open(search_url(s["search_url"], q))
@@ -834,11 +835,15 @@ class Worker:
                         cands = find_candidates(res.html, res.final_url, title, product.get("ean"),
                                                 product.get("mpn"), product.get("brand"))
                         if not cands and returns_home(res.html, res.final_url, f"https://{s['domain']}/"):
-                            broken = True  # το URL αναζήτησης ανοίγει την αρχική: καμία λέξη δεν θα βρει κάτι
-                            break
+                            homes += 1  # δύο φορές η αρχική: το URL αναζήτησης είναι λάθος, άλλη λέξη δεν θα βοηθήσει
+                            if homes >= 2:
+                                break
                         if cands or self._stop.is_set():
                             break
-                    self._mark_search_broken(s, broken)
+                    if cands or not homes:
+                        self._mark_search_broken(s, False)  # η αναζήτηση δουλεύει (έστω και χωρίς αποτελέσματα)
+                    elif homes >= 2 or homes == len(queries):
+                        self._mark_search_broken(s, True)
                     for c in cands:
                         self.db.add_listing(product_id, c["url"], status="candidate", title=c["title"])
                         found += 1

@@ -31,6 +31,20 @@ def test_lian_li_variants():
         assert _s(LIAN, bad) < 0.5, bad
 
 
+def test_review_regressions():
+    assert _s("Corsair RM850x 850W", "Corsair RM850x 850W 80 Plus Gold") >= 0.8  # «Plus» δεν είναι έκδοση εδώ
+    assert _s("Noctua NH-D15", "Noctua NH-D15 CPU Air Cooler") >= 0.8
+    assert _s("Topdon V300", "Topdon V3000 Diagnostic", "Topdon") == 0  # V300 ≠ V3000
+    assert _s("Anker PowerCore 20000mAh", "Anker PowerCore 10000mAh") < 0.5
+    assert _s("Samsung Galaxy S24 256GB", "Samsung Galaxy S24 512GB") < 0.5
+    assert _s("Samsung Galaxy S24 256GB", "Samsung Galaxy S24 Ultra 256GB") == 0
+    assert _s("Κουτί Υπολογιστή Lian Li O11 Dynamic EVO XL Full Tower", "Lian Li O11 Dynamic EVO XL ATX Case Black") >= 0.5
+    assert _s("Intel Core i5 13600K", "Intel Core i5-13600K Box") >= 0.8
+    assert model_codes("Intel Core i5 13600K") == ["13600k"] and model_codes("APC Back-UPS 1500VA") == []
+    assert build_queries("Lian Li O11 Dynamic EVO XL", brand="Lian Li")[0] == "Lian Li O11 Dynamic EVO XL"
+    assert "(2x8GB)" not in build_queries("Kingston FURY Beast 16GB (2x8GB) DDR4 3200MHz", brand="Kingston")[0]
+
+
 def test_build_queries_short_model_first():
     assert build_queries(LIAN)[0] == LIAN
     assert build_queries(TOPDON, brand="Topdon")[0] == "Topdon V3000"
@@ -38,8 +52,8 @@ def test_build_queries_short_model_first():
     assert build_queries("Samsung Galaxy S24 Ultra 256GB", brand="Samsung")[0] == "Samsung Galaxy S24 Ultra"
 
 
-def _page(canonical, body):
-    return (f'<html><head><link rel="canonical" href="{canonical}"><meta property="og:url" content="{canonical}">'
+def _page(canonical, body, title="You.gr"):
+    return (f'<html><head><title>{title}</title><link rel="canonical" href="{canonical}">'
             f"</head><body>{body}{'x' * 600}</body></html>")
 
 
@@ -50,9 +64,13 @@ def test_search_that_returns_home_is_detected():
     res = _page("https://www.you.gr/search?q=lian", "<a>lian li</a>" * 5)
     assert not returns_home(res, "https://www.you.gr/search?q=lian", "https://you.gr/")
     assert looks_like_search_results(res, "https://www.you.gr/search?q=lian", "lian li", "https://www.you.gr/", home)
-    # Ίδιος αριθμός εμφανίσεων με την αρχική: δεν είναι αποτελέσματα
+    # Ίδιος τίτλος και ίδιος αριθμός εμφανίσεων με την αρχική: δεν είναι αποτελέσματα
     same = _page("https://www.you.gr/x", "<a>lian li</a> <a>lian li</a>")
     assert not looks_like_search_results(same, "https://www.you.gr/x", "lian li", "https://www.you.gr/", home)
+    # Το og:url ίδιο σε όλο το site δεν σημαίνει αρχική
+    og = ('<html><head><meta property="og:url" content="https://www.you.gr/"></head><body>'
+          + "<a>lian li</a>" * 3 + "x" * 600 + "</body></html>")
+    assert not returns_home(og, "https://www.you.gr/search?q=lian", "https://www.you.gr/")
 
 
 def _browser(pages):
