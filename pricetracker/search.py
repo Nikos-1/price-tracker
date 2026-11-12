@@ -54,26 +54,210 @@ def build_query(title: str | None, ean: str | None = None, mpn: str | None = Non
     return " ".join(words[:7])
 
 
+# Τεχνικά χαρακτηριστικά (24000mAh, 12V, 850W, 512GB…): δεν είναι κωδικός μοντέλου και συχνά λείπουν από τίτλους
+_UNITS = {"mah", "ah", "wh", "kwh", "va", "v", "w", "kw", "a", "gb", "tb", "mb", "mm", "cm", "m", "kg", "g", "hz", "khz",
+          "mhz", "ghz", "l", "ml", "inch", "in", "mp", "k", "p", "fps", "db", "bar", "nm", "rpm", "x", "cc", "t", "lm",
+          "pcs", "τεμ", "lt", "lb", "oz", "dpi", "mbps", "gbps", "mt", "cl"}
+# Μονογράμματες μονάδες μόνο με μικρό αριθμό: «4K», «2x», «5A» είναι χαρακτηριστικά, «13600K», «RM850x» μοντέλα
+_SHORT_UNITS = {"k", "x", "t", "a"}
+
+
+def _unit(t: str) -> tuple[str, str] | None:
+    """(μονάδα, τιμή) αν η λέξη είναι τεχνικό χαρακτηριστικό (24000mAh, 12V, 850W, 2x8GB), αλλιώς None."""
+    t = t.lower().strip("()[]{},;:")
+    m = re.fullmatch(r"(\d{1,2})x(\d+(?:[.,]\d+)?)([a-zα-ω]*)", t)  # «2x8GB»: συσκευασία (όχι το «5800X3D»)
+    if m and (not m.group(3) or m.group(3) in _UNITS):
+        return "x" + m.group(3), f"{m.group(1)}x{m.group(2)}"
+    m = re.fullmatch(r"(\d+(?:[.,]\d+)?)([a-zα-ω]+)", t)
+    if not m or m.group(2) not in _UNITS:
+        return None
+    if m.group(2) in _SHORT_UNITS and float(m.group(1).replace(",", ".")) >= (100 if m.group(2) == "x" else 1000):
+        return None
+    return m.group(2), m.group(1).replace(",", ".")
+
+
+def _units(toks) -> dict[str, set[str]]:
+    out: dict[str, set[str]] = {}
+    for t in toks:
+        u = _unit(t)
+        if u:
+            out.setdefault(u[0], set()).add(u[1])
+    return out
+
+
+def _compact(text: str) -> str:
+    return re.sub(r"[\s\-./_]+", "", normalize(text))
+
+
+def model_codes(text: str) -> list[str]:
+    """Κωδικοί μοντέλου στον τίτλο: λέξεις με γράμματα ΚΑΙ αριθμούς (V3000, RM850x, SM-S921B), όχι μονάδες
+    μέτρησης (24000mAh, 12V) ή σκέτοι αριθμοί (χρονιές κ.λπ.)."""
+    out = []
+    for t in tokens(text):
+        c = t.replace("-", "").replace(".", "")
+        if len(c) >= 3 and re.search(r"\d", c) and re.search(r"[a-zα-ω]", c) and not _unit(t) and c not in out:
+            out.append(c)
+    return out
+
+
+def build_queries(title: str | None, ean: str | None = None, mpn: str | None = None,
+                  brand: str | None = None) -> list[str]:
+    """Αναζητήσεις με τη σειρά που δοκιμάζονται: κωδικός κατασκευαστή, «μάρκα + μοντέλο» (οι μηχανές αναζήτησης
+    των καταστημάτων συχνά δεν βγάζουν τίποτα με μεγάλο τίτλο) και μετά οι πρώτες λέξεις του τίτλου."""
+    out = []
+    if mpn and len(mpn) >= 4:
+        out.append(build_query(title, ean, mpn, brand))
+    words = (title or "").replace(",", " ").split()
+    models = [w for w in words if model_codes(w)][:2]
+    if models:
+        b = (brand or "").strip()
+        if not b:  # μάρκα = η πρώτη λατινική λέξη πριν από τον κωδικό («Τροφοδοτικό Corsair RM850x» → Corsair)
+            b = next((w for w in words[:words.index(models[0])]
+                      if not re.search(r"[α-ωά-ώ]", w, re.I) and re.search(r"[a-z]", w, re.I) and not _unit(w)), "")
+        # «μάρκα + μοντέλο + έκδοση»: οι λατινικές λέξεις γύρω από τον κωδικό (Galaxy S24 Ultra, O11 Dynamic EVO XL,
+        # RM850x 2021), ώστε το κατάστημα να μην επιστρέψει μόνο άλλες εκδόσεις του ίδιου μοντέλου
+        brand_words = ({x.casefold() for x in b.split()} | {_compact(b)}) if b else set()
+
+        def plain(w):
+            ts = tokens(w)
+            return (bool(ts) and not re.search(r"[α-ωά-ώ]", w, re.I) and not any(_unit(t) for t in ts)
+                    and w.casefold() not in brand_words and _compact(w) not in brand_words)
+
+        def with_brand(ws):
+            return " ".join(([b] if b and _compact(b) not in _compact(" ".join(ws)) else []) + ws)
+
+        i = words.index(models[0])
+        span = [models[0]]
+        for w in reversed(words[max(0, i - 2):i]):  # «Galaxy» στο «Samsung Galaxy S24»
+            if not plain(w):
+                break
+            span.insert(0, w)
+        for w in words[i + 1:i + 4]:
+            if not plain(w):
+                break
+            span.append(w)
+        if len(span) > 1:
+            out.append(with_brand(span))
+        out.append(with_brand(models))
+    out.append(build_query(title))
+    return [q for i, q in enumerate(out) if q and q not in out[:i]]
+
+
 def search_url(template: str, query: str) -> str:
     return template.replace("{q}", quote_plus(query))
 
 
-def score(query_tokens: list[str], candidate_title: str, codes: list[str]) -> float:
-    ct = set(tokens(candidate_title))
+def _has_code(code: str, text: str) -> bool:
+    """Ο κωδικός υπάρχει στο κείμενο ως κωδικός, όχι ως κομμάτι μεγαλύτερου αριθμού (V300 ≠ V3000, O11 = O11D).
+    Ελέγχεται σε όλο το κείμενο χωρίς κενά και σε κάθε κομμάτι του («i5-13600KF» → «13600kf»)."""
+    pat = re.compile(r"(?<!\d)" * code[0].isdigit() + re.escape(code) + r"(?!\d)")
+    parts = [x for x in re.split(r"[\s\-./_()\[\],]+", normalize(text)) if x]
+    # και δύο διαδοχικά κομμάτια μαζί («RM 850x», «O11 D»), αλλά όχι με χαρακτηριστικό («S2 4GB» ≠ «S24»)
+    pairs = [a + b for a, b in zip(parts, parts[1:]) if not _unit(a) and not _unit(b)]
+    return any(pat.search(x) for x in parts + pairs)
+
+
+def _model_positions(seq: list[str], models) -> list[int]:
+    return [i for i, t in enumerate(seq) if any(_has_code(m, t) for m in models)]
+
+
+def _span_variants(seq: list[str], models, keep) -> set[str]:
+    """Οι εκδόσεις (Mini, EVO, XL, Pro…) στις λέξεις γύρω από τον κωδικό μοντέλου: «O11 Dynamic EVO XL»,
+    «MacBook Air M3». Όχι πιο μακριά («RM850x 850W 80 Plus Gold», «NH-D15 CPU Air Cooler»). `keep(t)`: ποιες
+    άλλες λέξεις επιτρέπεται να υπάρχουν ανάμεσα (π.χ. το «Dynamic»)."""
+    out: set[str] = set()
+    for i in _model_positions(seq, models):
+        out |= _variants([seq[i]])
+        for rng in (range(i + 1, min(len(seq), i + 5)), range(i - 1, max(-1, i - 3), -1)):
+            for j in rng:
+                t = seq[j]
+                v = _variants([t])
+                if v:
+                    out |= v
+                elif t.isdigit() or _unit(t) or not keep(t):
+                    break
+    return out
+
+
+def score(query_tokens: list[str], candidate_title: str, codes: list[str],
+          models: list[str] | None = None, brand: str | None = None) -> float:
+    cseq = tokens(candidate_title)
+    ct = set(cseq)
     if not ct or not query_tokens:
         return 0.0
-    qt = set(query_tokens)
-    s = len(qt & ct) / len(qt)
+    qseq = list(query_tokens)
+    qt = set(qseq)
+    compact = _compact(candidate_title)
+    # Μια λέξη μετράει ως κοινή και όταν είναι γραμμένη αλλιώς («LIAN-LI» = «Lian Li»)
+    common = {t for t in qt if t in ct or (len(t) >= 4 and _compact(t) in compact)}
+    s = len(common) / len(qt)
     norm_title = normalize(candidate_title).replace("-", "").replace(" ", "")
     for code in codes:
         c = normalize(code).replace("-", "").replace(" ", "")
         if len(c) >= 4 and c in norm_title:
             s += 0.6
-    # Τα νούμερα (π.χ. 850W, 4070) πρέπει να ταιριάζουν
+    # Τα νούμερα (π.χ. 850W, 4070) πρέπει να ταιριάζουν· τα τεχνικά χαρακτηριστικά (24000mAh) που λείπουν από
+    # τον τίτλο του καταστήματος δεν μετράνε αρνητικά
     q_nums = {t for t in qt if re.search(r"\d", t)}
     if q_nums:
-        s += 0.3 * len(q_nums & ct) / len(q_nums) - 0.3 * (len(q_nums - ct) / len(q_nums))
+        missing = {t for t in q_nums - ct if not _unit(t)}
+        s += 0.3 * len(q_nums & ct) / len(q_nums) - 0.3 * (len(missing) / len(q_nums))
+    if models:
+        cand_models = model_codes(candidate_title)
+        if all(_has_code(m, candidate_title) for m in models):
+            # Ίδιος κωδικός μοντέλου: σχεδόν σίγουρα το ίδιο προϊόν (λιγότερο σίγουρα αν λείπει η μάρκα)
+            strong = 0.8 if not brand or _compact(brand) in compact else 0.6
+            s = max(s, strong + 0.2 * len(common) / len(qt))
+        elif any(_same_family(m, x) for m in models for x in cand_models):
+            return 0.0  # άλλο μοντέλο της ίδιας σειράς (V2000 αντί για V3000, RM850e αντί για RM850x)
+        # Εκδόσεις του ίδιου μοντέλου (O11 Dynamic EVO XL ≠ O11 Mini / Air / EVO): μια έκδοση που δεν ζητήθηκε
+        # σημαίνει άλλο προϊόν, και μια έκδοση που ζητήθηκε αλλά λείπει σημαίνει μάλλον το βασικό μοντέλο
+        qv = _span_variants(qseq, models, lambda t: not re.search(r"[α-ω]", t))
+        cv = _span_variants(cseq, models + cand_models, lambda t: t in qt or any(t in q for q in qt))
+        if cv - qv:
+            return 0.0
+        if qv - cv:
+            s = min(s, 0.45)
+    # Ίδιο χαρακτηριστικό με άλλη τιμή (256GB ≠ 512GB, 20000mAh ≠ 10000mAh): άλλο προϊόν
+    qu, cu = _units(qt), _units(ct)
+    if any(qu[u] - cu[u] and cu[u] - qu[u] for u in qu.keys() & cu.keys()):
+        s = min(s, 0.3)
+    # Αξεσουάρ για το προϊόν («Θήκη για …», «Καλώδιο για …»): όχι το ίδιο το προϊόν. Μετά τον κωδικό και χωρίς
+    # «για/for» μάλλον περιγράφει το ίδιο το προϊόν («Lian Li O11 … ATX Case»), οπότε μετράει λιγότερο
+    acc = [i for i, w in enumerate(cseq) if w in ACCESSORY_WORDS and w not in qt]
+    if acc:
+        pos = _model_positions(cseq, models) if models else []
+        after = bool(pos) and min(acc) > pos[0] and not (ct & FOR_WORDS)
+        s -= 0.2 if after else 0.5
     return round(s, 3)
+
+
+FOR_WORDS = {"για", "for", "fur", "pour", "per", "para", "compatible", "συμβατο", "συμβατη", "συμβατα", "συμβατος"}
+ACCESSORY_WORDS = {"θηκη", "θηκες", "καλυμμα", "καλωδιο", "ανταπτορας", "προστατευτικο", "τζαμακι",
+                   "βαση", "ανταλλακτικο", "ανταλλακτικα", "case", "cover", "sleeve", "cable", "adapter", "mount",
+                   "protector", "replacement", "spare", "hulle", "kabel", "halterung", "etui", "custodia", "funda"}
+
+
+VARIANT_WORDS = {"mini", "micro", "xl", "xxl", "max", "plus", "pro", "ultra", "lite", "air", "evo", "vision",
+                 "flow", "slim", "compact", "se", "fe", "neo", "nano", "elite", "turbo", "duo", "jr", "junior"}
+
+
+def _variants(toks) -> set[str]:
+    out = set()
+    for t in toks:
+        out |= {p for p in t.split("-") if p in VARIANT_WORDS}
+    return out
+
+
+def _same_family(a: str, b: str) -> bool:
+    """«v3000» και «v2000», «rm850x» και «rm850e», «v300» και «v3000»: ίδια γράμματα μπροστά, άλλος κωδικός
+    (όχι όμως «o11» και «o11d», που είναι ο ίδιος κωδικός γραμμένος συντομευμένα)."""
+    pa, pb = re.match(r"[a-zα-ω]*", a).group(0), re.match(r"[a-zα-ω]*", b).group(0)
+    short, long_ = sorted((a, b), key=len)
+    if a == b or _has_code(short, long_):
+        return False
+    # ίδια γράμματα μπροστά (V3000/V2000), ή ίδια γράμματα παντού με άλλα νούμερα (5800X3D/7800X3D, 13600K/14600K)
+    return (bool(pa) and pa == pb) or re.sub(r"\d", "", a) == re.sub(r"\d", "", b)
 
 
 def _looks_like_product(url: str) -> bool:
@@ -112,6 +296,7 @@ def find_candidates(html: str, page_url: str, title: str, ean=None, mpn=None, br
 
     q_tokens = tokens(" ".join(filter(None, [brand, title])))
     codes = [c for c in (ean, mpn) if c]
+    models = model_codes(title or "")
     seen = {}
     for a in anchors:
         href = a.get("href")
@@ -129,7 +314,7 @@ def find_candidates(html: str, page_url: str, title: str, ean=None, mpn=None, br
             text = (img.get("alt") or "") if img else ""
         if len(text) < 6:
             continue
-        sc = score(q_tokens, text, codes)
+        sc = score(q_tokens, text, codes, models, brand)
         if sc < min_score:
             continue
         url = _clean_url(url, uhost)
@@ -274,11 +459,36 @@ def probe_words(html: str, n: int = 2) -> list[str]:
     return [w for w, c in cnt.most_common(n) if c >= 2]
 
 
+_LANG_ROOTS = {"", "el", "gr", "en", "el-gr", "en-gr", "en-us", "en-gb", "de", "ell", "eng", "index.php", "index.html"}
+
+
+def _is_home(url: str | None, home_url: str) -> bool:
+    """Η διεύθυνση είναι η αρχική σελίδα (ή η αρχική μιας γλώσσας, π.χ. /el/), χωρίς ?query: το «/?s=…» του
+    WordPress είναι κανονική αναζήτηση. Αγνοούνται http/https, www, η τελική κάθετος και το #."""
+    if not url:
+        return False
+    a, h = urlparse(url.strip().split("#")[0]), urlparse(home_url)
+    host = lambda p: (p.netloc or "").lower().removeprefix("www.")
+    return host(a) == host(h) and not a.query and a.path.strip("/").lower() in _LANG_ROOTS
+
+
+def returns_home(html: str, final_url: str, home_url: str) -> bool:
+    """Η «αναζήτηση» άνοιξε στην ουσία την αρχική σελίδα: είτε έγινε ανακατεύθυνση εκεί, είτε η σελίδα δηλώνει
+    ως κανονική της διεύθυνση (canonical) την αρχική. Έτσι φαίνεται ένα λάθος URL αναζήτησης (π.χ. το «?s=…» του
+    WordPress σε κατάστημα που δεν το υποστηρίζει). Το og:url δεν μετράει: πολλά καταστήματα το έχουν ίδιο παντού."""
+    if _is_home(final_url, home_url):
+        return True
+    soup = BeautifulSoup(html or "", "html.parser")
+    link = soup.find("link", rel=lambda r: r and "canonical" in (r if isinstance(r, list) else [r]))
+    u = (link or {}).get("href")
+    return bool(u) and _is_home(urljoin(final_url or home_url, u), home_url)
+
+
 def looks_like_search_results(html: str, final_url: str, word: str, home_url: str) -> bool:
     """Ελέγχει ότι η σελίδα είναι πράγματι αποτελέσματα αναζήτησης για τη λέξη."""
     if not html or len(html) < 500:
         return False
-    if final_url.rstrip("/") == home_url.rstrip("/"):
+    if returns_home(html, final_url, home_url):
         return False
     low = html.lower()
     w = word.lower()

@@ -227,6 +227,11 @@ class Database:
                 "INSERT OR IGNORE INTO shops(key,name,region,domain,search_url,country) VALUES(?,?,?,?,?,?)",
                 (s["key"], s["name"], s["region"], s["domain"], s["search_url"], s["country"]),
             )
+        for key, (url, bad) in shops_mod.SEARCH_URL_FIXES.items():
+            r = c.execute("SELECT id, search_url FROM shops WHERE key=?", (key,)).fetchone()
+            cur = (r["search_url"] or "") if r else None
+            if r and cur != url and (not cur or any(b in cur for b in bad)):
+                c.execute("UPDATE shops SET search_url=?, search_enabled=1 WHERE id=?", (url, r["id"]))
         # Γενικές κατηγορίες καταστημάτων: οι προεπιλεγμένες μπαίνουν μία φορά, μετά τις διαχειρίζεται ο χρήστης
         # (και όσες προστίθενται σε νεότερη έκδοση). Μια προεπιλεγμένη που έσβησε ο χρήστης δεν ξαναμπαίνει.
         row = c.execute("SELECT value FROM settings WHERE key='sectors_seeded'").fetchone()

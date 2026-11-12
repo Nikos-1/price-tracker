@@ -262,6 +262,16 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None, exports_dir
             out.append({"text": f"Δεν έγινε το αντίγραφο της βάσης στα Έγγραφα: {h['backup_error']}"})
         if (upd or {}).get("state") == "error" and (upd or {}).get("message"):
             out.append({"text": f"Ενημέρωση: {upd['message']}", "fix": "settings"})
+        broken = settings.get("search_broken") or {}
+        if isinstance(broken, dict) and broken:
+            # Μόνο όσα έχουν ακόμα το ίδιο URL αναζήτησης (αν το άλλαξες, δεν ισχύει πια)
+            urls = {sh["key"]: sh.get("search_url") for sh in db.list_shops() if sh.get("search_enabled")}
+            names = sorted(v.get("name") or k for k, v in broken.items()
+                           if isinstance(v, dict) and v.get("url") and urls.get(k) == v["url"])
+            if names:
+                out.append({"text": f"Η αναζήτηση δεν δουλεύει στο {', '.join(names)}: η διεύθυνση αναζήτησης ανοίγει "
+                                    "την αρχική σελίδα, οπότε δεν βρίσκονται προϊόντα εκεί. Διόρθωσέ τη στα Καταστήματα.",
+                            "fix": "settings"})
         try:
             stale = db.stale_products(24)
         except Exception:  # noqa: BLE001
