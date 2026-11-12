@@ -719,7 +719,7 @@ class Worker:
                             break
                         if res.status and res.status >= 400:
                             break  # η διεύθυνση δεν υπάρχει: επόμενο μοτίβο
-                        if looks_like_search_results(res.html, res.final_url, w, home.final_url, home.html):
+                        if looks_like_search_results(res.html, res.final_url, w, home.final_url):
                             found = tmpl
                             break
         except Exception as e:  # noqa: BLE001
@@ -781,23 +781,17 @@ class Worker:
                 if s["search_enabled"] and s.get("search_url") and s["id"] not in have_shops
                 and (not sector or not shop_secs.get(s["id"]) or sector in shop_secs[s["id"]])]
 
-    def _mark_search_broken(self, shop: dict, broken: bool):
-        """Κρατά ποια καταστήματα έχουν URL αναζήτησης που ανοίγει την αρχική σελίδα, για να φανεί στο «Υγεία».
-        Αποθηκεύεται και το URL: μόλις το διορθώσεις, η ειδοποίηση φεύγει μόνη της."""
-        cur = self.db.get_settings().get("search_broken") or {}
-        if not isinstance(cur, dict):
-            cur = {}
+    @staticmethod
+    def _mark_search_broken(cur: dict, shop: dict, broken: bool) -> bool:
+        """Κρατά (στο `cur`) ποια καταστήματα έχουν URL αναζήτησης που ανοίγει την αρχική σελίδα, για να φανεί
+        στο «Υγεία». Κρατιέται και το URL: μόλις το διορθώσεις, η ειδοποίηση φεύγει μόνη της. True αν άλλαξε κάτι."""
         key = shop["key"]
         if broken:
             if (cur.get(key) or {}).get("url") == shop["search_url"]:
-                return
+                return False
             cur[key] = {"name": shop["name"], "url": shop["search_url"], "at": time.time()}
-            self._log(f"{shop['name']}: η αναζήτηση ανοίγει την αρχική σελίδα – έλεγξε το URL αναζήτησης")
-        elif key in cur:
-            del cur[key]
-        else:
-            return
-        self.db.set_settings({"search_broken": cur})
+            return True
+        return cur.pop(key, None) is not None
 
     def search_product(self, product_id: int, label: str | None = None) -> list[str]:
         """Αναζήτηση στα καταστήματα που δεν έχουν ακόμα το προϊόν. Επιστρέφει τα καταστήματα με νέες προτάσεις."""
@@ -814,7 +808,13 @@ class Worker:
         # περνούν όλες, και περισσότερες σημαίνουν αργή αναζήτηση και μπλοκαρίσματα
         queries = build_queries(title, product.get("ean"), product.get("mpn"), product.get("brand"))
         queries = queries[:2] + [product["ean"]] if product.get("ean") else queries[:3]
+        if not queries:
+            return []
         query = queries[0]
+        broken_now = self.db.get_settings().get("search_broken") or {}
+        if not isinstance(broken_now, dict):
+            broken_now = {}
+        broken_changed = False
         self.status.update(task=(f"{label}: " if label else "") + f"Αναζήτηση «{query}»", progress=0,
                            total=len(shops))
         new_shops: list[str] = []
@@ -840,10 +840,12 @@ class Worker:
                                 break
                         if cands or self._stop.is_set():
                             break
-                    if cands or not homes:
-                        self._mark_search_broken(s, False)  # η αναζήτηση δουλεύει (έστω και χωρίς αποτελέσματα)
+                    if cands or not homes:  # η αναζήτηση δουλεύει (έστω και χωρίς αποτελέσματα)
+                        broken_changed |= self._mark_search_broken(broken_now, s, False)
                     elif homes >= 2 or homes == len(queries):
-                        self._mark_search_broken(s, True)
+                        if self._mark_search_broken(broken_now, s, True):
+                            broken_changed = True
+                            self._log(f"{s['name']}: η αναζήτηση ανοίγει την αρχική σελίδα – έλεγξε το URL αναζήτησης")
                     for c in cands:
                         self.db.add_listing(product_id, c["url"], status="candidate", title=c["title"])
                         found += 1
@@ -851,5 +853,7 @@ class Worker:
                         new_shops.append(s["name"])
                 except Exception as e:  # noqa: BLE001
                     self._log(f"Αναζήτηση στο {s['name']} απέτυχε: {str(e).splitlines()[0][:200]}")
+        if broken_changed:
+            self.db.set_settings({"search_broken": broken_now})
         self._log(f"Βρέθηκαν {found} πιθανές αντιστοιχίες – έλεγξέ τις στο προϊόν")
         return new_shops

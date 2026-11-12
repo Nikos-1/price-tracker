@@ -58,20 +58,20 @@ def build_query(title: str | None, ean: str | None = None, mpn: str | None = Non
 _UNITS = {"mah", "ah", "wh", "kwh", "va", "v", "w", "kw", "a", "gb", "tb", "mb", "mm", "cm", "m", "kg", "g", "hz", "khz",
           "mhz", "ghz", "l", "ml", "inch", "in", "mp", "k", "p", "fps", "db", "bar", "nm", "rpm", "x", "cc", "t", "lm",
           "pcs", "τεμ", "lt", "lb", "oz", "dpi", "mbps", "gbps", "mt", "cl"}
-# Μονογράμματες μονάδες μόνο με μικρό αριθμό: «4K», «2x», «5A» είναι χαρακτηριστικά, «13600K» και «7950X» μοντέλα
+# Μονογράμματες μονάδες μόνο με μικρό αριθμό: «4K», «2x», «5A» είναι χαρακτηριστικά, «13600K», «RM850x» μοντέλα
 _SHORT_UNITS = {"k", "x", "t", "a"}
 
 
 def _unit(t: str) -> tuple[str, str] | None:
     """(μονάδα, τιμή) αν η λέξη είναι τεχνικό χαρακτηριστικό (24000mAh, 12V, 850W, 2x8GB), αλλιώς None."""
     t = t.lower().strip("()[]{},;:")
-    m = re.fullmatch(r"(\d+)x(\d+(?:[.,]\d+)?)([a-zα-ω]*)", t)  # «2x8GB»: συσκευασία, όχι μοντέλο
-    if m:
+    m = re.fullmatch(r"(\d{1,2})x(\d+(?:[.,]\d+)?)([a-zα-ω]*)", t)  # «2x8GB»: συσκευασία (όχι το «5800X3D»)
+    if m and (not m.group(3) or m.group(3) in _UNITS):
         return "x" + m.group(3), f"{m.group(1)}x{m.group(2)}"
     m = re.fullmatch(r"(\d+(?:[.,]\d+)?)([a-zα-ω]+)", t)
     if not m or m.group(2) not in _UNITS:
         return None
-    if m.group(2) in _SHORT_UNITS and float(m.group(1).replace(",", ".")) >= 1000:
+    if m.group(2) in _SHORT_UNITS and float(m.group(1).replace(",", ".")) >= (100 if m.group(2) == "x" else 1000):
         return None
     return m.group(2), m.group(1).replace(",", ".")
 
@@ -113,7 +113,7 @@ def build_queries(title: str | None, ean: str | None = None, mpn: str | None = N
         b = (brand or "").strip()
         if not b:  # μάρκα = η πρώτη λατινική λέξη πριν από τον κωδικό («Τροφοδοτικό Corsair RM850x» → Corsair)
             b = next((w for w in words[:words.index(models[0])]
-                      if not re.search(r"[α-ωά-ώ]", w, re.I) and re.search(r"[a-z]", w, re.I)), "")
+                      if not re.search(r"[α-ωά-ώ]", w, re.I) and re.search(r"[a-z]", w, re.I) and not _unit(w)), "")
         # «μάρκα + μοντέλο + έκδοση»: οι λατινικές λέξεις γύρω από τον κωδικό (Galaxy S24 Ultra, O11 Dynamic EVO XL,
         # RM850x 2021), ώστε το κατάστημα να μην επιστρέψει μόνο άλλες εκδόσεις του ίδιου μοντέλου
         brand_words = ({x.casefold() for x in b.split()} | {_compact(b)}) if b else set()
@@ -151,7 +151,10 @@ def _has_code(code: str, text: str) -> bool:
     """Ο κωδικός υπάρχει στο κείμενο ως κωδικός, όχι ως κομμάτι μεγαλύτερου αριθμού (V300 ≠ V3000, O11 = O11D).
     Ελέγχεται σε όλο το κείμενο χωρίς κενά και σε κάθε κομμάτι του («i5-13600KF» → «13600kf»)."""
     pat = re.compile(r"(?<!\d)" * code[0].isdigit() + re.escape(code) + r"(?!\d)")
-    return any(pat.search(x) for x in [_compact(text)] + re.split(r"[\s\-./_()]+", normalize(text)) if x)
+    parts = [x for x in re.split(r"[\s\-./_()\[\],]+", normalize(text)) if x]
+    # και δύο διαδοχικά κομμάτια μαζί («RM 850x», «O11 D»), αλλά όχι με χαρακτηριστικό («S2 4GB» ≠ «S24»)
+    pairs = [a + b for a, b in zip(parts, parts[1:]) if not _unit(a) and not _unit(b)]
+    return any(pat.search(x) for x in parts + pairs)
 
 
 def _model_positions(seq: list[str], models) -> list[int]:
@@ -251,7 +254,10 @@ def _same_family(a: str, b: str) -> bool:
     (όχι όμως «o11» και «o11d», που είναι ο ίδιος κωδικός γραμμένος συντομευμένα)."""
     pa, pb = re.match(r"[a-zα-ω]*", a).group(0), re.match(r"[a-zα-ω]*", b).group(0)
     short, long_ = sorted((a, b), key=len)
-    return a != b and bool(pa) and pa == pb and not _has_code(short, long_)
+    if a == b or _has_code(short, long_):
+        return False
+    # ίδια γράμματα μπροστά (V3000/V2000), ή ίδια γράμματα παντού με άλλα νούμερα (5800X3D/7800X3D, 13600K/14600K)
+    return (bool(pa) and pa == pb) or re.sub(r"\d", "", a) == re.sub(r"\d", "", b)
 
 
 def _looks_like_product(url: str) -> bool:
@@ -453,29 +459,32 @@ def probe_words(html: str, n: int = 2) -> list[str]:
     return [w for w, c in cnt.most_common(n) if c >= 2]
 
 
-def _same_page(a: str | None, b: str | None) -> bool:
-    """Ίδια διεύθυνση, αγνοώντας http/https, www, την τελική κάθετο και το ?query/#."""
-    def norm(u):
-        u = (u or "").strip().lower().split("#")[0].split("?")[0]
-        u = re.sub(r"^https?://(www\.)?", "", u)
-        return u.rstrip("/")
-    return bool(a and b) and norm(a) == norm(b)
+_LANG_ROOTS = {"", "el", "gr", "en", "el-gr", "en-gr", "en-us", "en-gb", "de", "ell", "eng", "index.php", "index.html"}
+
+
+def _is_home(url: str | None, home_url: str) -> bool:
+    """Η διεύθυνση είναι η αρχική σελίδα (ή η αρχική μιας γλώσσας, π.χ. /el/), χωρίς ?query: το «/?s=…» του
+    WordPress είναι κανονική αναζήτηση. Αγνοούνται http/https, www, η τελική κάθετος και το #."""
+    if not url:
+        return False
+    a, h = urlparse(url.strip().split("#")[0]), urlparse(home_url)
+    host = lambda p: (p.netloc or "").lower().removeprefix("www.")
+    return host(a) == host(h) and not a.query and a.path.strip("/").lower() in _LANG_ROOTS
 
 
 def returns_home(html: str, final_url: str, home_url: str) -> bool:
     """Η «αναζήτηση» άνοιξε στην ουσία την αρχική σελίδα: είτε έγινε ανακατεύθυνση εκεί, είτε η σελίδα δηλώνει
     ως κανονική της διεύθυνση (canonical) την αρχική. Έτσι φαίνεται ένα λάθος URL αναζήτησης (π.χ. το «?s=…» του
     WordPress σε κατάστημα που δεν το υποστηρίζει). Το og:url δεν μετράει: πολλά καταστήματα το έχουν ίδιο παντού."""
-    if _same_page(final_url, home_url):
+    if _is_home(final_url, home_url):
         return True
     soup = BeautifulSoup(html or "", "html.parser")
     link = soup.find("link", rel=lambda r: r and "canonical" in (r if isinstance(r, list) else [r]))
     u = (link or {}).get("href")
-    return bool(u) and _same_page(urljoin(final_url or home_url, u), home_url)
+    return bool(u) and _is_home(urljoin(final_url or home_url, u), home_url)
 
 
-def looks_like_search_results(html: str, final_url: str, word: str, home_url: str,
-                              home_html: str | None = None) -> bool:
+def looks_like_search_results(html: str, final_url: str, word: str, home_url: str) -> bool:
     """Ελέγχει ότι η σελίδα είναι πράγματι αποτελέσματα αναζήτησης για τη λέξη."""
     if not html or len(html) < 500:
         return False
@@ -489,10 +498,4 @@ def looks_like_search_results(html: str, final_url: str, word: str, home_url: st
     nf = ("404", "page not found", "δεν βρέθηκε η σελίδα", "seite nicht gefunden")
     title = (BeautifulSoup(html, "html.parser").title or "")
     title = title.get_text().lower() if title else ""
-    # Οι λέξεις δοκιμής βγαίνουν από την αρχική σελίδα, άρα υπάρχουν και εκεί: μια σελίδα με τον ίδιο τίτλο και
-    # όχι περισσότερες εμφανίσεις της λέξης είναι απλώς η αρχική ξανά
-    if home_html:
-        ht = BeautifulSoup(home_html, "html.parser").title
-        if ht and ht.get_text().strip().lower() == title.strip() and low.count(w) <= home_html.lower().count(w):
-            return False
     return not any(x in title for x in nf)

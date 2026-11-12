@@ -42,6 +42,12 @@ def test_review_regressions():
     assert _s("Intel Core i5 13600K", "Intel Core i5-13600K Box") >= 0.8
     assert model_codes("Intel Core i5 13600K") == ["13600k"] and model_codes("APC Back-UPS 1500VA") == []
     assert build_queries("Lian Li O11 Dynamic EVO XL", brand="Lian Li")[0] == "Lian Li O11 Dynamic EVO XL"
+    assert model_codes("AMD Ryzen 7 5800X3D") == ["5800x3d"]
+    assert _s("AMD Ryzen 7 5800X3D", "AMD Ryzen 7 7800X3D") == 0 and _s("Intel Core i5 13600K", "Intel Core i5 14600K") == 0
+    assert _s("Samsung Galaxy S24", "Samsung Galaxy S2 4GB") < 0.5
+    assert _s("Corsair RM850x", "Corsair RM 850x 2021") >= 0.8
+    assert build_queries("Τροφοδοτικό 850W RM850x")[0] == "RM850x"
+    assert build_queries("") == []
     assert "(2x8GB)" not in build_queries("Kingston FURY Beast 16GB (2x8GB) DDR4 3200MHz", brand="Kingston")[0]
 
 
@@ -63,10 +69,11 @@ def test_search_that_returns_home_is_detected():
     assert not looks_like_search_results(home, "https://www.you.gr/?s=lian+li", "lian li", "https://www.you.gr/")
     res = _page("https://www.you.gr/search?q=lian", "<a>lian li</a>" * 5)
     assert not returns_home(res, "https://www.you.gr/search?q=lian", "https://you.gr/")
-    assert looks_like_search_results(res, "https://www.you.gr/search?q=lian", "lian li", "https://www.you.gr/", home)
-    # Ίδιος τίτλος και ίδιος αριθμός εμφανίσεων με την αρχική: δεν είναι αποτελέσματα
-    same = _page("https://www.you.gr/x", "<a>lian li</a> <a>lian li</a>")
-    assert not looks_like_search_results(same, "https://www.you.gr/x", "lian li", "https://www.you.gr/", home)
+    assert looks_like_search_results(res, "https://www.you.gr/search?q=lian", "lian li", "https://www.you.gr/")
+    # Κανονική αναζήτηση WordPress («/?s=…») χωρίς canonical: δεν είναι η αρχική
+    assert not returns_home("<html></html>", "https://shop.gr/?s=foo&post_type=product", "https://shop.gr/")
+    # Ανακατεύθυνση στην αρχική μιας γλώσσας
+    assert returns_home("<html></html>", "https://shop.gr/el/", "https://shop.gr/")
     # Το og:url ίδιο σε όλο το site δεν σημαίνει αρχική
     og = ('<html><head><meta property="og:url" content="https://www.you.gr/"></head><body>'
           + "<a>lian li</a>" * 3 + "x" * 600 + "</body></html>")
