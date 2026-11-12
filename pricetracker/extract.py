@@ -212,7 +212,7 @@ CART_WORDS = ["add to cart", "add to basket", "προσθήκη στο καλά�
               "in den warenkorb", "aggiungi al carrello", "ajouter au panier", "añadir a la cesta",
               "añadir al carrito", "do koszyka", "do košíku", "lägg i varukorgen"]
 PRODUCT_AREAS = ["[itemtype*='schema.org/Product']", "main .product", "#product", ".product-info", ".product-details",
-                 ".product-main", ".product-page", "[class*='shop-details-inner']", "main"]
+                 ".product-main", ".product-page", ".ltn__shop-details-inner", "main"]
 
 
 # Περιοχές της σελίδας που ΔΕΝ αφορούν το προϊόν: σχετικά προϊόντα, καρουζέλ, mini-cart, μενού
@@ -587,18 +587,20 @@ def _without_old_prices(el):
     return el
 
 
+_BARE_PRICE = re.compile(rf"\s*(?:(?:{_SYM})\s?{_NUM}|{_NUM}\s?(?:{_SYM}))\s*", re.I)
+
+
 def _price_of(el, wrapper=False):
-    """(τιμή, νόμισμα) από ένα στοιχείο τιμής ή None. Σε ένα γενικό «πλαίσιο τιμής» με δύο τιμές χωρίς σήμανση
-    (π.χ. «200,00€ 179,97€») κρατάμε τη μικρότερη: η άλλη είναι η παλιά τιμή."""
+    """(τιμή, νόμισμα) από ένα στοιχείο τιμής ή None. Ένα γενικό «πλαίσιο τιμής» που περιέχει ΜΟΝΟ δύο σκέτες
+    τιμές χωρίς σήμανση (π.χ. «200,00€ 179,97€») δίνει τη μικρότερη: η άλλη είναι η παλιά τιμή. Αν υπάρχει
+    οποιοδήποτε άλλο κείμενο (δόσεις, «χωρίς ΦΠΑ»…), κρατάμε την πρώτη τιμή όπως πάντα."""
     el = _without_old_prices(el)
     price = parse_price(el.get("data-price") or _text(el))
     if price and wrapper:
-        # μόνο φύλλα που είναι σκέτη τιμή («179,97 €»), όχι δόσεις, ποσοστά ή άλλο κείμενο
-        bare = re.compile(rf"\s*(?:(?:{_SYM})\s?{_NUM}|{_NUM}\s?(?:{_SYM}))\s*", re.I)
-        leaves = {parse_price(_text(x)) for x in el.find_all(True) if not x.find(True) and bare.fullmatch(_text(x))}
-        leaves.discard(None)
-        if len(leaves) > 1:
-            price = min(leaves)
+        leaves = [x for x in el.find_all(True) if not x.find(True) and _text(x)]
+        if len(leaves) == 2 and all(_BARE_PRICE.fullmatch(_text(x)) for x in leaves) \
+                and _BARE_PRICE.sub("", _text(el)).strip() == "":
+            price = min(parse_price(_text(x)) for x in leaves)
     return (price, detect_currency(_text(el), None)) if price else None
 
 
@@ -607,33 +609,30 @@ def from_generic(soup) -> ProductInfo:
     h1 = soup.find("h1")
     p.title = _text(h1) or None
     area = _product_area(soup)
+    ranks = {}
 
     def rank(e):
         # 0: μέσα στην περιοχή του προϊόντος, 1: όχι σε σχετικά/καρουζέλ/μενού, 2: όχι σε καθαρά «άλλα προϊόντα»
         # (κλάσεις όπως «product-details-menu» μοιάζουν με μενού), 3: οτιδήποτε άλλο
-        if area is not None and any(a is area for a in e.parents) and not _outside_product(e, stop=area):
-            return 0
-        if not _outside_product(e):
-            return 1
-        return 2 if not _outside_product(e, inner=True) else 3
+        if id(e) not in ranks:
+            if area is not None and (e is area or any(a is area for a in e.parents)) \
+                    and not _outside_product(e, stop=area):
+                ranks[id(e)] = 0
+            elif not _outside_product(e):
+                ranks[id(e)] = 1
+            else:
+                ranks[id(e)] = 2 if not _outside_product(e, inner=True) else 3
+        return ranks[id(e)]
 
-    fallback = None
-    for s in GENERIC_PRICE_SELECTORS:
-        ranked = sorted(((rank(e), i, e) for i, e in enumerate(soup.select(s)) if not _is_old_price(e)),
-                        key=lambda t: t[:2])
-        for r, _, e in ranked:
-            found = _price_of(e, wrapper=(s == ".product-price"))
-            if found is None:
-                continue
-            if r < 3:
-                p.price, p.currency = found
-                break
-            fallback = fallback or found
+    cands = [(s, [e for e in soup.select(s) if not _is_old_price(e)]) for s in GENERIC_PRICE_SELECTORS]
+    # Πρώτα η καλύτερη θέση σε όλους τους selectors (μια τιμή στην περιοχή του προϊόντος νικά μια τιμή
+    # αλλού), και μέσα στην ίδια θέση η σειρά των selectors και της σελίδας
+    for tier in range(4):
+        found = next((f for s, els in cands for e in els if rank(e) == tier
+                      for f in [_price_of(e, wrapper=(s == ".product-price"))] if f), None)
+        if found:
+            p.price, p.currency = found
             break
-        if p.price is not None:
-            break
-    if p.price is None and fallback:
-        p.price, p.currency = fallback
     for s in GENERIC_AVAIL_SELECTORS:
         el = soup.select_one(s)
         if el is not None:
@@ -693,7 +692,9 @@ def _undouble_url(u):
     """«https://site.gr/https://site.gr/img.jpg» → «https://site.gr/img.jpg»: κάποια καταστήματα κολλάνε τη
     διεύθυνσή τους δύο φορές. Διορθώνεται μόνο όταν επαναλαμβάνεται ο ίδιος host, όχι σε proxy/CDN ή σε
     διευθύνσεις με άλλη διεύθυνση μέσα στο query."""
-    m = _DOUBLED_URL.match(u or "")
-    if m and m.group(2).lower().removeprefix("www.") == m.group(4).lower().removeprefix("www."):
-        return m.group(3)
+    m = _DOUBLED_URL.match(u) if isinstance(u, str) else None
+    if m:
+        h1, h2 = (m.group(i).lower().removeprefix("www.") for i in (2, 4))
+        if h1 == h2 or h2.endswith("." + h1) or h1.endswith("." + h2):  # ίδιο κατάστημα ή δικό του CDN
+            return m.group(3)
     return u

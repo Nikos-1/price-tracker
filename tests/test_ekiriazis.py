@@ -59,8 +59,7 @@ def test_empty_first_candidate_tries_next():
 
 
 def test_wrapper_with_unmarked_old_price():
-    h = """<html><body><div class="product-price"><span>200.00€</span> <span>179.97€</span>
-      <span>3 δόσεις 60,00€</span></div></body></html>"""
+    h = """<html><body><div class="product-price"><span>200.00€</span> <span>179.97€</span></div></body></html>"""
     assert extract(h, URL).price == 179.97
 
 
@@ -77,3 +76,25 @@ def test_doubled_jsonld_image():
       "image":"https://s.gr/https://s.gr/a.jpg","offers":{"price":"10","priceCurrency":"EUR"}}</script>
       </head><body></body></html>"""
     assert extract(h, "https://s.gr/p").image == "https://s.gr/a.jpg"
+
+
+def test_wrapper_keeps_price_when_vat_or_instalment_present():
+    for extra in ("<small>Χωρίς ΦΠΑ:</small> <span>145,14 €</span>",
+                  "<span>ή 3 άτοκες δόσεις των</span> <span>59,99 €</span>"):
+        h = f'<html><body><div class="product-price"><span>179,97 €</span> {extra}</div></body></html>'
+        assert extract(h, URL).price == 179.97, extra
+
+
+def test_product_area_price_beats_bundle_price():
+    h = """<html><body><div class="product-details"><span class="price"></span>
+      <div class="product-price">12,00 €</div></div>
+      <div class="bundle-box"><span class="price">5,00 €</span></div></body></html>"""
+    assert extract(h, URL).price == 12.0
+
+
+def test_undouble_cdn_and_list_image():
+    assert _undouble_url("https://s.gr/https://cdn.s.gr/a.jpg") == "https://cdn.s.gr/a.jpg"
+    h = """<html><head><script type="application/ld+json">{"@type":"Product","name":"X",
+      "image":{"@type":"ImageObject","url":["https://s.gr/a.jpg"]},"offers":{"price":"10","priceCurrency":"EUR"}}
+      </script></head><body></body></html>"""
+    assert extract(h, "https://s.gr/p").price == 10.0
