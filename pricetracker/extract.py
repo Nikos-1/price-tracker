@@ -347,7 +347,9 @@ def _first(v):
 def from_jsonld(soup, url: str = "") -> ProductInfo:
     info = _from_jsonld(soup, deep=False, url=url)
     if info.price is None:
-        info.merge(_from_jsonld(soup, deep=True, url=url), "jsonld")
+        deep = _from_jsonld(soup, deep=True, url=url)
+        info.merge(deep, "jsonld")
+        info.offers = info.offers or deep.offers
     return info
 
 
@@ -741,6 +743,8 @@ def extract(html: str, url: str = "") -> ProductInfo:
     info.merge(jl, "jsonld")
     if not info.offers and jl.offers:
         info.offers = jl.offers
+    if not is_comparison_site(host):
+        info.offers = []  # λίστα καταστημάτων μόνο από σελίδες σύγκρισης τιμών, όχι από marketplace
     info.merge(from_meta(soup), "meta")
     info.merge(from_generic(soup), "generic")
     if info.price is None and _looks_like_challenge(soup, html):
@@ -759,6 +763,17 @@ def extract(html: str, url: str = "") -> ProductInfo:
     return info
 
 
+# Σελίδες σύγκρισης τιμών: από αυτές (και μόνο) διαβάζεται λίστα καταστημάτων με τιμές
+COMPARISON_DOMAINS = ("skroutz.gr", "bestprice.gr", "idealo.", "geizhals.", "ledenicheur.fr", "trovaprezzi.it",
+                      "tweakers.net", "ceneo.pl", "pricerunner.", "pricespy.")
+
+
+def is_comparison_site(host: str) -> bool:
+    host = (host or "").lower()
+    return any(host == d or host.endswith("." + d) or (d.endswith(".") and (host.startswith(d) or "." + d in host))
+               for d in COMPARISON_DOMAINS)
+
+
 def _finish_offers(info: ProductInfo, soup, url: str):
     """Σύνδεσμος ανά κατάστημα (π.χ. «/to/<προσφορά>/» του BestPrice) και τιμή της γραμμής = η φθηνότερη
     ΔΙΑΘΕΣΙΜΗ προσφορά, ώστε η γραμμή να συμφωνεί με τη λίστα καταστημάτων από κάτω."""
@@ -774,13 +789,18 @@ def _finish_offers(info: ProductInfo, soup, url: str):
         if not o.get("url"):
             # απευθείας σύνδεσμος στο κατάστημα όταν υπάρχει στη σελίδα, αλλιώς η σελίδα του προϊόντος
             o["url"] = links.get(oid) or page
+        if not re.match(r"https?://", str(o.get("url") or ""), re.I):
+            o["url"] = None  # μόνο κανονικοί σύνδεσμοι (όχι javascript: κ.λπ. από τη σελίδα)
         o["currency"] = normalize_currency(o.get("currency")) or info.currency or "EUR"
-    live = [o for o in info.offers if o.get("in_stock")]
-    pool = live or info.offers
+    live = [o for o in info.offers if o.get("in_stock") is True]
+    unknown = [o for o in info.offers if o.get("in_stock") is None]
+    # Η γραμμή δείχνει τη φθηνότερη διαθέσιμη. Χωρίς καμία σίγουρα διαθέσιμη, τη φθηνότερη με άγνωστη
+    # διαθεσιμότητα (ποτέ μια εξαντλημένη, όσο υπάρχει άλλη), και «μη διαθέσιμο» μόνο αν όλες είναι εξαντλημένες.
+    pool = live or unknown or info.offers
     best = min(pool, key=lambda o: o["price"])
     info.price, info.currency = best["price"], best["currency"]
-    info.in_stock = True if live else (False if all(o.get("in_stock") is False for o in info.offers) else None)
-    info.price_source = info.price_source or "offers"
+    info.in_stock = True if live else (None if unknown else False)
+    info.price_source = "offers"
 
 
 _DOUBLED_URL = re.compile(r"(https?://([^/?#]+))/+(https?://([^/?#]+)(?:[/?#].*)?)$", re.I)

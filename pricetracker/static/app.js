@@ -506,7 +506,7 @@ let chart;
 function offersRow(l) {
   const offers = l.offers || [];
   if (!offers.length) return "";
-  const avail = offers.filter((o) => o.in_stock).length;
+  const avail = offers.filter((o) => o.in_stock === 1 || o.in_stock === true).length;
   const change = (o) => {
     if (o.price_eur == null || o.prev_price_eur == null || Math.abs(o.price_eur - o.prev_price_eur) < 0.005) return "";
     const d = o.price_eur - o.prev_price_eur;
@@ -516,8 +516,8 @@ function offersRow(l) {
     <summary>Καταστήματα στο ${esc(l.shop_name)}: ${offers.length} (${avail} διαθέσιμα)</summary>
     <table class="offers">
       <tr><th>Κατάστημα</th><th>Τιμή</th><th>Διαθέσιμο</th><th>Αλλαγή</th><th>Χαμηλότερη</th><th></th></tr>
-      ${offers.map((o) => `<tr class="${o.in_stock ? "" : "unavail"}">
-        <td>${o.url ? `<a href="${esc(o.url)}" target="_blank" rel="noopener">${esc(o.shop)}</a>` : esc(o.shop)}</td>
+      ${offers.map((o) => `<tr class="${o.in_stock === 0 || o.in_stock === false ? "unavail" : ""}">
+        <td>${/^https?:\/\//i.test(o.url || "") ? `<a href="${esc(o.url)}" target="_blank" rel="noopener">${esc(o.shop)}</a>` : esc(o.shop)}</td>
         <td class="num">${money(o.price, o.currency, o.price_eur)}</td>
         <td>${o.in_stock == null ? "–" : o.in_stock ? '<span class="chip ok">Ναι</span>' : '<span class="chip bad">Όχι</span>'}</td>
         <td class="num">${change(o)}</td>
@@ -529,7 +529,7 @@ function offersRow(l) {
 async function showOfferHistory(lid, shop) {
   const rows = await api("GET", `/api/listings/${lid}/offers?shop=${encodeURIComponent(shop)}`);
   const body = rows.length ? `<table class="offers"><tr><th>Έλεγχος</th><th>Τιμή</th><th>Διαθέσιμο</th></tr>
-    ${rows.slice(-60).reverse().map((h) => `<tr class="${h.in_stock ? "" : "unavail"}"><td>${fmtDate(h.checked_at)}</td>
+    ${rows.slice(-60).reverse().map((h) => `<tr class="${h.in_stock === 0 ? "unavail" : ""}"><td>${fmtDate(h.checked_at)}</td>
       <td class="num">${money(h.price, h.currency, h.price_eur)}</td>
       <td>${h.in_stock == null ? "–" : h.in_stock ? "Ναι" : "Όχι"}</td></tr>`).join("")}</table>`
     : `<p class="hint">Δεν υπάρχει ιστορικό.</p>`;

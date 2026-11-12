@@ -82,6 +82,7 @@ CREATE TABLE IF NOT EXISTS listing_offers (
     in_stock INTEGER
 );
 CREATE INDEX IF NOT EXISTS ix_offers_listing ON listing_offers(listing_id, history_id);
+CREATE INDEX IF NOT EXISTS ix_offers_shop ON listing_offers(listing_id, shop COLLATE NOCASE, history_id);
 CREATE TABLE IF NOT EXISTS alerts_sent (
     listing_id INTEGER NOT NULL REFERENCES listings(id) ON DELETE CASCADE,
     kind TEXT NOT NULL,
@@ -686,42 +687,38 @@ class Database:
         return ts
 
     def latest_offers(self, listing_id: int) -> list[dict]:
-        """Τα καταστήματα του τελευταίου ελέγχου με προσφορές, μαζί με την προηγούμενη τιμή του καθενός και
-        τη χαμηλότερη που έχει δει η εφαρμογή. Πρώτα τα διαθέσιμα από το φθηνότερο, μετά τα μη διαθέσιμα."""
+        """Τα καταστήματα του τελευταίου επιτυχημένου ελέγχου, μαζί με την προηγούμενη τιμή του καθενός και τη
+        χαμηλότερη που έχει δει η εφαρμογή. Αν ο τελευταίος έλεγχος δεν έδωσε λίστα, δεν δείχνεται παλιά λίστα
+        ως τρέχουσα. Σειρά: διαθέσιμα από το φθηνότερο, άγνωστα, μη διαθέσιμα."""
         with self.conn() as c:
-            r = c.execute("SELECT MAX(history_id) FROM listing_offers WHERE listing_id=?", (listing_id,)).fetchone()
-            if not r or not r[0]:
+            last = c.execute("SELECT MAX(id) FROM price_history WHERE listing_id=? AND error IS NULL",
+                             (listing_id,)).fetchone()[0]
+            if last is None:
                 return []
-            hid = r[0]
             rows = [dict(x) for x in c.execute(
-                "SELECT shop, url, price, currency, price_eur, in_stock, checked_at FROM listing_offers"
-                " WHERE listing_id=? AND history_id=?", (listing_id, hid))]
-            for o in rows:
-                prev = c.execute(
-                    "SELECT price, price_eur, in_stock FROM listing_offers WHERE listing_id=? AND shop=?"
-                    " AND history_id<? AND price IS NOT NULL ORDER BY history_id DESC LIMIT 1",
-                    (listing_id, o["shop"], hid)).fetchone()
-                o["prev_price_eur"] = prev["price_eur"] if prev else None
-                low = c.execute(
-                    "SELECT MIN(price_eur) AS m, MIN(checked_at) AS first FROM listing_offers"
-                    " WHERE listing_id=? AND shop=?", (listing_id, o["shop"])).fetchone()
-                o["min_price_eur"] = low["m"]
-                o["first_seen"] = low["first"]
-        rows.sort(key=lambda o: (not o["in_stock"], o["price_eur"] if o["price_eur"] is not None else 1e18,
-                                 o["shop"].lower()))
+                """SELECT * FROM (
+                     SELECT shop, url, price, currency, price_eur, in_stock, checked_at, history_id,
+                            LAG(price_eur) OVER w AS prev_price_eur,
+                            MIN(price_eur) OVER (PARTITION BY shop COLLATE NOCASE) AS min_price_eur
+                     FROM listing_offers WHERE listing_id=?
+                     WINDOW w AS (PARTITION BY shop COLLATE NOCASE ORDER BY history_id))
+                   WHERE history_id=?""", (listing_id, last))]
+        rank = {1: 0, None: 1, 0: 2}
+        rows.sort(key=lambda o: (rank.get(o["in_stock"], 1),
+                                 o["price_eur"] if o["price_eur"] is not None else 1e18, o["shop"].lower()))
         return rows
 
-    def all_offers(self, listing_id: int) -> list[dict]:
+    def offers(self, listing_id: int, shop: str | None = None) -> list[dict]:
+        """Όλο το ιστορικό καταστημάτων μιας σελίδας σύγκρισης τιμών, ή ενός καταστήματος (χωρίς διάκριση
+        κεφαλαίων/πεζών στο όνομα)."""
+        q = ("SELECT checked_at, shop, url, price, currency, price_eur, in_stock FROM listing_offers"
+             " WHERE listing_id=?")
+        args = [listing_id]
+        if shop is not None:
+            q += " AND shop=? COLLATE NOCASE"
+            args.append(shop)
         with self.conn() as c:
-            return [dict(x) for x in c.execute(
-                "SELECT checked_at, shop, url, price, currency, price_eur, in_stock FROM listing_offers"
-                " WHERE listing_id=? ORDER BY history_id, shop", (listing_id,))]
-
-    def offer_history(self, listing_id: int, shop: str) -> list[dict]:
-        with self.conn() as c:
-            return [dict(x) for x in c.execute(
-                "SELECT checked_at, price, currency, price_eur, in_stock, url FROM listing_offers"
-                " WHERE listing_id=? AND shop=? ORDER BY history_id", (listing_id, shop))]
+            return [dict(x) for x in c.execute(q + " ORDER BY history_id, shop", args)]
 
     # ---------- ειδοποιήσεις που στάλθηκαν (για να μη στέλνεται η ίδια ξανά και ξανά) ----------
     def last_alert(self, listing_id: int, kind: str):

@@ -94,7 +94,7 @@ def export_xlsx(db, data_dir: Path, out_path: Path, product_ids: list[int] | Non
                     cell.hyperlink = (Path(data_dir) / r["screenshot"]).as_uri()
                     cell.font = Font(color="2563EB", underline="single")
                 hist_ws.cell(hist_ws.max_row, 1).number_format = "dd/mm/yyyy hh:mm"
-            for o in db.all_offers(l["id"]):
+            for o in db.offers(l["id"]):
                 if offers_ws is None:
                     offers_ws = wb.create_sheet("Skroutz-BestPrice", 2)
                     used.add("Skroutz-BestPrice")

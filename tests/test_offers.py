@@ -52,7 +52,7 @@ def test_offers_saved_sorted_with_change_and_lowest(tmp_path, monkeypatch):
     a = offers[0]
     assert a["price_eur"] == 170.0 and a["prev_price_eur"] == 180.0 and a["min_price_eur"] == 170.0
     assert db.get_listing(lid)["last_price"] == 170.0  # η γραμμή κρατά τη φθηνότερη διαθέσιμη
-    assert [h["price"] for h in db.offer_history(lid, "Κατάστημα Α")] == [180.0, 170.0]
+    assert [h["price"] for h in db.offers(lid, "Κατάστημα Α")] == [180.0, 170.0]
 
 
 def test_offers_in_product_api_and_history_route(tmp_path, monkeypatch):
@@ -77,7 +77,7 @@ def test_offers_removed_with_listing_history_and_in_excel(tmp_path, monkeypatch)
     assert db.latest_offers(lid) == []
     db.record_check(lid, 1.0, "EUR", True, offers=[A])
     db.delete_listing(lid)
-    assert db.all_offers(lid) == []
+    assert db.offers(lid) == []
 
 
 def test_normal_listing_has_no_offers(tmp_path):
@@ -85,7 +85,7 @@ def test_normal_listing_has_no_offers(tmp_path):
     pid = db.create_product("X")
     lid = db.add_listing(pid, "https://www.plaisio.gr/p/1")
     db.record_check(lid, 10.0, "EUR", True)
-    assert db.latest_offers(lid) == [] and db.all_offers(lid) == []
+    assert db.latest_offers(lid) == [] and db.offers(lid) == []
 
 
 # ---------------------------------------------------------------- ανάγνωση σελίδων
@@ -162,3 +162,46 @@ def test_all_offers_out_of_stock():
     h = _bestprice([_bp_offer(1, "Α", 100.0, "OutOfStock"), _bp_offer(2, "Β", 90.0, "OutOfStock")])
     i = extract(h, "https://www.bestprice.gr/item/1/x.html")
     assert i.in_stock is False and i.price == 90.0
+
+
+# ---------------------------------------------------------------- ευρήματα ελέγχου κώδικα
+def test_unknown_stock_beats_cheaper_sold_out():
+    h = _bestprice([_bp_offer(1, "Α", 100.0, "OutOfStock"), _bp_offer(2, "Β", 120.0, "Weird")])
+    h = h.replace("https://schema.org/Weird", "")  # Β: χωρίς διαθεσιμότητα
+    i = extract(h, "https://www.bestprice.gr/item/1/x.html")
+    assert i.price == 120.0 and i.in_stock is None
+
+
+def test_old_offer_list_not_shown_after_check_without_offers(tmp_path):
+    db = Database(tmp_path / "db.sqlite")
+    pid = db.create_product("X")
+    lid = db.add_listing(pid, "https://www.bestprice.gr/item/1/x.html")
+    db.record_check(lid, 10.0, "EUR", True, offers=[{**A, "price_eur": 180.0}, {**B, "price_eur": 175.0}])
+    assert len(db.latest_offers(lid)) == 2
+    db.record_check(lid, None, None, None, error="Δεν βρέθηκε τιμή")  # σφάλμα: η λίστα μένει
+    assert len(db.latest_offers(lid)) == 2
+    db.record_check(lid, 10.0, "EUR", True)  # επιτυχημένος έλεγχος χωρίς λίστα: δεν δείχνεται η παλιά
+    assert db.latest_offers(lid) == []
+
+
+def test_shop_name_case_does_not_split_history(tmp_path):
+    db = Database(tmp_path / "db.sqlite")
+    pid = db.create_product("X")
+    lid = db.add_listing(pid, "https://www.bestprice.gr/item/1/x.html")
+    db.record_check(lid, 1.0, "EUR", True, offers=[{"shop": "PUBLIC", "price": 12.0, "price_eur": 12.0, "in_stock": True}])
+    db.record_check(lid, 1.0, "EUR", True, offers=[{"shop": "Public", "price": 10.0, "price_eur": 10.0, "in_stock": True}])
+    o = db.latest_offers(lid)[0]
+    assert o["prev_price_eur"] == 12.0 and o["min_price_eur"] == 10.0
+    assert len(db.offers(lid, "public")) == 2
+
+
+def test_non_http_offer_links_dropped_and_marketplaces_ignored():
+    import json
+    offers = [_bp_offer(1, "Α", 10.0), _bp_offer(2, "Β", 11.0)]
+    offers[0]["url"] = "javascript:alert(1)"
+    i = extract(_bestprice(offers).replace("https://www.bestprice.gr/to/201941633/topdon.html?from=1", "#"),
+                "https://www.bestprice.gr/item/1/x.html")
+    assert {o["shop"]: o["url"] for o in i.offers}["Α"] is None
+    # Ένα marketplace με πολλούς πωλητές στο JSON-LD κρατά τη δική του τιμή και δεν βγάζει λίστα
+    m = extract(_bestprice(offers), "https://www.public.gr/product/1")
+    assert m.offers == [] and m.price_source != "offers"
