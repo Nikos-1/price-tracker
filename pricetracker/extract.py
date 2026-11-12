@@ -444,6 +444,11 @@ def from_meta(soup) -> ProductInfo:
     p.currency = meta("product:price:currency", "og:price:currency", "priceCurrency")
     p.in_stock = availability_from_schema(meta("product:availability", "og:availability", "availability"))
     p.image = meta("og:image")
+    if p.image and p.image.rfind("://") > p.image.find("://"):
+        # «https://site.gr/https://site.gr/img.jpg»: κάποια καταστήματα κολλάνε τη διεύθυνση δύο φορές
+        m = re.search(r"https?://(?!.*https?://)", p.image)
+        if m:
+            p.image = p.image[m.start():]
     p.ean = meta("gtin13", "gtin")
     p.mpn = meta("mpn")
     if p.price is None:
@@ -534,6 +539,7 @@ SITE_RULES = {
 GENERIC_PRICE_SELECTORS = [
     "[data-price]", ".product-price .price", ".price-box .price", ".product__price", ".price--current",
     ".current-price", ".price-current", ".final-price", ".product-info-price .price", ".price",
+    ".product-price",
 ]
 GENERIC_AVAIL_SELECTORS = [
     ".availability", ".stock", ".product-availability", "[class*=availability]", "[class*=stock]",
@@ -589,10 +595,17 @@ def from_generic(soup) -> ProductInfo:
     p = ProductInfo()
     h1 = soup.find("h1")
     p.title = _text(h1) or None
+    area = _product_area(soup)
     for s in GENERIC_PRICE_SELECTORS:
-        el = next((e for e in soup.select(s) if not _is_old_price(e)), None)
-        if el is None:
+        cands = [e for e in soup.select(s) if not _is_old_price(e)]
+        if not cands:
             continue
+        # Προτιμάμε την τιμή μέσα στην περιοχή του προϊόντος και όχι σε σχετικά προϊόντα / καρουζέλ
+        el = (next((e for e in cands if area is not None and (e is area or area in e.parents)
+                    and not _outside_product(e, stop=area)), None)
+              or next((e for e in cands if not _outside_product(e)), None)
+              # κλάσεις όπως «product-details-menu» μοιάζουν με μενού: τότε αποκλείουμε μόνο τα καθαρά «άλλα προϊόντα»
+              or next((e for e in cands if not _outside_product(e, stop=soup)), None) or cands[0])
         el = _without_old_prices(el)
         val = el.get("data-price") or _text(el)
         price = parse_price(val)
