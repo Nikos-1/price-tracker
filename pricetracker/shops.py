@@ -98,6 +98,13 @@ def _shop(key, name, country, domain, search_url=""):
 # Όσα δεν έχουν URL αναζήτησης, η εφαρμογή το βρίσκει μόνη της την πρώτη φορά (αυτόματη εύρεση).
 # Νέα καταστήματα εδώ προστίθενται και στις υπάρχουσες εγκαταστάσεις με την επόμενη έκδοση,
 # χωρίς να αλλάζουν ή να σβήνονται όσα έχει ήδη ο χρήστης.
+# Διορθώσεις URL αναζήτησης σε υπάρχουσες εγκαταστάσεις: μπαίνουν όταν το κατάστημα δεν έχει URL ή έχει ένα από
+# τα γνωστά λάθος (π.χ. το «?s=» που βρήκε η αυτόματη εύρεση στο you.gr και ανοίγει την αρχική). Ένα URL που
+# έβαλε ο χρήστης μόνος του δεν αλλάζει.
+SEARCH_URL_FIXES = {
+    "you_gr": ("https://www.you.gr/special-pages/searchq?query={q}", ("?s={q}",)),
+}
+
 DEFAULT_SHOPS = [
     # --- Ελλάδα ---
     _shop("bestprice", "BestPrice", "GR", "bestprice.gr", "https://www.bestprice.gr/search?q={q}"),
@@ -107,7 +114,7 @@ DEFAULT_SHOPS = [
     _shop("eshop", "e-shop.gr", "GR", "e-shop.gr", "https://www.e-shop.gr/search?q={q}"),
     _shop("germanos", "Germanos", "GR", "germanos.gr"),
     _shop("electronet", "Electronet", "GR", "electronet.gr"),
-    _shop("you_gr", "You.gr", "GR", "you.gr"),
+    _shop("you_gr", "You.gr", "GR", "you.gr", "https://www.you.gr/special-pages/searchq?query={q}"),
     _shop("shopflix", "Shopflix", "GR", "shopflix.gr"),
     _shop("msystems", "MSystems", "GR", "msystems.gr"),
     _shop("stelioskanaras", "Stelios Kanaras", "GR", "stelioskanaras.gr"),

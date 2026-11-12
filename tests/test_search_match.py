@@ -147,3 +147,15 @@ def test_find_candidates_skips_other_variants():
             "</body></html>")
     got = find_candidates(html, "https://shop.gr/search?q=o11", LIAN)
     assert [c["url"] for c in got] == ["https://shop.gr/p/3"]
+
+
+def test_you_gr_search_url_fixed_on_upgrade(tmp_path):
+    good = "https://www.you.gr/special-pages/searchq?query={q}"
+    db = Database(tmp_path / "db.sqlite")
+    sid = next(s["id"] for s in db.list_shops() if s["key"] == "you_gr")
+    assert db.get_shop(sid)["search_url"] == good
+    db.update_shop(sid, search_url="https://www.you.gr/?s={q}&post_type=product", search_enabled=1)
+    db = Database(tmp_path / "db.sqlite")  # επόμενο άνοιγμα της εφαρμογής
+    assert db.get_shop(sid)["search_url"] == good
+    db.update_shop(sid, search_url="https://www.you.gr/my?x={q}")  # δικό του URL: δεν αλλάζει
+    assert Database(tmp_path / "db.sqlite").get_shop(sid)["search_url"] == "https://www.you.gr/my?x={q}"
