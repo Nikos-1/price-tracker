@@ -23,6 +23,8 @@ class ProductInfo:
     blocked: str | None = None  # π.χ. captcha
     source: list[str] = field(default_factory=list)
     price_source: str | None = None  # από πού διαβάστηκε η τιμή: jsonld, meta, generic, amazon…
+    # Σελίδες σύγκρισης τιμών (Skroutz, BestPrice): ένα dict ανά κατάστημα με shop, url, price, currency, in_stock
+    offers: list[dict] = field(default_factory=list)
 
     def merge(self, other: "ProductInfo", tag: str):
         changed = False

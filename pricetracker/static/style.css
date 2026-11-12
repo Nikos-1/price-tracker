@@ -148,3 +148,12 @@ tr.group-row td { background: var(--chip); font-weight: 600; font-size: 12px; te
 }
 main { overflow-wrap: anywhere; }
 .status .warn { color: var(--warn); }
+
+/* Καταστήματα από σελίδα σύγκρισης τιμών (Skroutz, BestPrice) κάτω από τη γραμμή της */
+tr.offers-row > td { padding-top: 0; background: transparent; }
+tr.offers-row details > summary { cursor: pointer; color: var(--link, var(--accent)); padding: 4px 0; }
+table.offers { width: 100%; margin: 4px 0; font-size: 0.92em; }
+table.offers td, table.offers th { padding: 4px 8px; }
+table.offers tr.unavail td { opacity: 0.55; }
+.chg-down { color: #15803d; }
+.chg-up { color: #b91c1c; }

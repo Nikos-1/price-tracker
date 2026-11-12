@@ -379,6 +379,7 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None, exports_dir
             l["analysis"] = analysis.analyze([{**x, "price": x.get("price_eur")} for x in h])
             l["region_label"] = REGION_LABELS.get(l.get("region"), "")
             l["country_label"] = country_label(l.get("country"))
+            l["offers"] = db.latest_offers(l["id"])
         cands = db.list_listings(product_id=pid, status="candidate")
         for l in cands:
             l["region_label"] = REGION_LABELS.get(l.get("region"), "")
@@ -452,6 +453,13 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None, exports_dir
         db.set_listing_status(lid, "active")
         worker.enqueue("check_listing", listing_id=lid)
         return jsonify({"ok": True})
+
+    @app.get("/api/listings/<int:lid>/offers")
+    def listing_offer_history(lid):
+        """Ιστορικό ενός καταστήματος όπως το έδειχνε η σελίδα σύγκρισης τιμών (Skroutz, BestPrice)."""
+        if not db.get_listing(lid):
+            abort(404)
+        return jsonify(db.offer_history(lid, request.args.get("shop") or ""))
 
     @app.post("/api/listings/<int:lid>/undo")
     def undo_listing(lid):
