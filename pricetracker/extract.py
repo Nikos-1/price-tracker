@@ -434,6 +434,44 @@ def _from_jsonld(soup, deep: bool, url: str = "") -> ProductInfo:
     return info
 
 
+# «Κατόπιν παραγγελίας», προπαραγγελία κ.λπ.: σε λίστα καταστημάτων μετράνε ως «όχι διαθέσιμο τώρα»
+BACKORDER_PHRASES = ["κατόπιν παραγγελίας", "κατόπιν παραγγελιας", "προπαραγγελία", "προπαραγγελια", "pre-order",
+                     "preorder", "backorder", "auf bestellung", "su ordinazione", "sur commande", "bajo pedido"]
+
+
+def _offer_availability(schema_value=None, text: str = "") -> bool | None:
+    """Διαθεσιμότητα ενός καταστήματος σε σελίδα σύγκρισης τιμών. None = άγνωστη."""
+    v = str(schema_value or "").strip().lower().rsplit("/", 1)[-1]
+    if v:
+        known = availability_from_schema(v)
+        if known is not None:
+            return known
+        if v in AVAIL_UNKNOWN:
+            return False
+        text = f"{v} {text or ''}"  # π.χ. «Διαθέσιμο» γραμμένο ως κείμενο αντί για schema.org
+    t = " ".join((text or "").lower().split())
+    if any(p in t for p in BACKORDER_PHRASES):
+        return False
+    return availability_from_text(t)
+
+
+def _shop_key(name: str) -> str:
+    from pricetracker.db import shop_key
+
+    return shop_key(name)
+
+
+def _keep_best(offers: list[dict]) -> list[dict]:
+    """Ένα κατάστημα ανά όνομα: το διαθέσιμο πριν από το άγνωστο/εξαντλημένο, και μετά το φθηνότερο."""
+    best = {}
+    rank = {True: 0, None: 1, False: 2}
+    for o in offers:
+        k = _shop_key(o["shop"])
+        if k not in best or (rank[o.get("in_stock")], o["price"]) < (rank[best[k].get("in_stock")], best[k]["price"]):
+            best[k] = o
+    return list(best.values())
+
+
 def _seller_offers(offer_list, url: str = "") -> list[dict]:
     """Σελίδες σύγκρισης τιμών (BestPrice κ.ά.): μια προσφορά ανά κατάστημα μέσα στο JSON-LD (συχνά μέσα σε
     AggregateOffer). Μετράει μόνο όταν υπάρχουν τουλάχιστον δύο διαφορετικά καταστήματα, ώστε ένα απλό
@@ -447,21 +485,19 @@ def _seller_offers(offer_list, url: str = "") -> list[dict]:
             flat.extend(x for x in (inner if isinstance(inner, list) else [inner]) if isinstance(x, dict))
         else:
             flat.append(o)
-    out, seen = [], set()
+    out = []
     for o in flat:
         seller = _first(o.get("seller"))
         name = seller.get("name") if isinstance(seller, dict) else seller
         name = " ".join(str(name or "").split())
         price = _offer_price(o)
-        if not name or price is None or name.lower() in seen:
+        if not name or price is None:
             continue
-        seen.add(name.lower())
-        avail = availability_from_schema(o.get("availability"))
-        if avail is None and o.get("availability"):
-            avail = False  # κατόπιν παραγγελίας / προπαραγγελία: όχι διαθέσιμο τώρα
+        avail = _offer_availability(o.get("availability"))
         out.append({"shop": name, "price": price, "currency": o.get("priceCurrency"), "in_stock": avail,
                     "url": None, "offer_id": str(o.get("@id") or "").rsplit("-", 1)[-1] or None,
                     "page_url": o.get("url") if isinstance(o.get("url"), str) else None})
+    out = _keep_best(out)
     return out if len(out) >= 2 else []
 
 
@@ -568,11 +604,8 @@ def from_skroutz(soup, html) -> ProductInfo:
     """Skroutz: κάθε κατάστημα είναι μια κάρτα με data-shop-id και data-raw-price. Οι «προβεβλημένες» κάρτες
     εμφανίζονται δύο φορές, οπότε κρατάμε μία ανά κατάστημα."""
     p = ProductInfo()
-    seen = set()
     for c in soup.select("li[data-shop-id][data-raw-price], li[data-shop-id][data-price]"):
         sid = c.get("data-shop-id")
-        if sid in seen:
-            continue
         price = parse_price(c.get("data-raw-price") or c.get("data-price"))
         if price is None:
             continue
@@ -583,16 +616,16 @@ def from_skroutz(soup, html) -> ProductInfo:
             a = c.select_one("a[href*='/shop/']")
             m = re.search(r"/shop/\d+/([^/#?]+)", a.get("href", "")) if a else None
             name = m.group(1).replace("-", " ") if m else f"Κατάστημα {sid}"
-        seen.add(sid)
-        text = _text(c).lower()
-        out = any(w in text for w in OUT_PHRASES)
-        cart = c.select_one(".add-to-cart-btn, button[class*=cart]")
-        cart_ok = cart is not None and not cart.has_attr("disabled")
-        stock = c.select_one(".stock")
-        in_stock = False if out else True if (cart_ok or stock or "παράδοση" in text) else None
+        in_stock = _offer_availability(text=_text(c))
+        if in_stock is None:
+            # Το Skroutz δείχνει «N τεμάχια» ή ενεργό καλάθι για ό,τι πουλιέται τώρα
+            cart = c.select_one(".add-to-cart-btn, button[class*=cart]")
+            if c.select_one(".stock") or (cart is not None and not cart.has_attr("disabled")):
+                in_stock = True
         href = c.get("data-product-url")
         p.offers.append({"shop": name, "price": price, "currency": "EUR", "in_stock": in_stock,
                          "url": ("https://www.skroutz.gr" + href) if href and href.startswith("/") else href})
+    p.offers = _keep_best(p.offers)
     return p
 
 

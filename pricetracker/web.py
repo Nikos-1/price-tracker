@@ -459,7 +459,7 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None, exports_dir
         """Ιστορικό ενός καταστήματος όπως το έδειχνε η σελίδα σύγκρισης τιμών (Skroutz, BestPrice)."""
         if not db.get_listing(lid):
             abort(404)
-        return jsonify(db.offers(lid, request.args.get("shop") or ""))
+        return jsonify(db.offers(lid, request.args.get("shop")))
 
     @app.post("/api/listings/<int:lid>/undo")
     def undo_listing(lid):

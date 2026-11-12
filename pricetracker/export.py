@@ -62,7 +62,7 @@ def export_xlsx(db, data_dir: Path, out_path: Path, product_ids: list[int] | Non
     hist_ws = wb.create_sheet("Ιστορικό")
     _header(hist_ws, ["Ημερομηνία", "Προϊόν", "Κατηγορία", "Κατάστημα", "Περιοχή", "Τιμή", "Νόμισμα", "Τιμή σε €",
                       "Διαθέσιμο", "Σφάλμα", "Screenshot", "Link"])
-    used = {"Σύνοψη", "Ιστορικό"}
+    used = {"Σύνοψη", "Ιστορικό", "Skroutz-BestPrice"}
     rates = db.get_settings().get("fx") or {}
     offers_ws = None  # φτιάχνεται μόνο αν υπάρχουν καταστήματα από Skroutz / BestPrice
 
@@ -97,7 +97,6 @@ def export_xlsx(db, data_dir: Path, out_path: Path, product_ids: list[int] | Non
             for o in db.offers(l["id"]):
                 if offers_ws is None:
                     offers_ws = wb.create_sheet("Skroutz-BestPrice", 2)
-                    used.add("Skroutz-BestPrice")
                     _header(offers_ws, ["Ημερομηνία", "Προϊόν", "Σελίδα σύγκρισης", "Κατάστημα", "Τιμή", "Νόμισμα",
                                         "Τιμή σε €", "Διαθέσιμο", "Link"])
                 offers_ws.append([datetime.fromisoformat(o["checked_at"]), p["name"], l.get("shop_name"), o["shop"],

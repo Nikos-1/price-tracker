@@ -75,6 +75,7 @@ CREATE TABLE IF NOT EXISTS listing_offers (
     history_id INTEGER REFERENCES price_history(id) ON DELETE CASCADE,  -- ο έλεγχος στον οποίο ανήκει
     checked_at TEXT NOT NULL,
     shop TEXT NOT NULL,
+    shop_key TEXT NOT NULL,  -- όνομα χωρίς διάκριση πεζών/κεφαλαίων (και ελληνικών), για το ιστορικό ανά κατάστημα
     url TEXT,
     price REAL,
     currency TEXT,
@@ -82,7 +83,7 @@ CREATE TABLE IF NOT EXISTS listing_offers (
     in_stock INTEGER
 );
 CREATE INDEX IF NOT EXISTS ix_offers_listing ON listing_offers(listing_id, history_id);
-CREATE INDEX IF NOT EXISTS ix_offers_shop ON listing_offers(listing_id, shop COLLATE NOCASE, history_id);
+CREATE INDEX IF NOT EXISTS ix_offers_shop ON listing_offers(listing_id, shop_key, history_id);
 CREATE TABLE IF NOT EXISTS alerts_sent (
     listing_id INTEGER NOT NULL REFERENCES listings(id) ON DELETE CASCADE,
     kind TEXT NOT NULL,
@@ -147,6 +148,15 @@ DEFAULT_SETTINGS = {
     "research_daily": True,          # μία φορά τη μέρα αναζήτηση στα καταστήματα που δεν έχουν το προϊόν
     "notify_new_shop": True,
 }
+
+
+def shop_key(name) -> str:
+    """Το όνομα ενός καταστήματος χωρίς διάκριση πεζών/κεφαλαίων και κενών («PUBLIC» = «Public»,
+    «ΚΑΤΑΣΤΗΜΑ» = «Κατάστημα»), για να μη χωρίζεται το ιστορικό του."""
+    import unicodedata
+
+    s = unicodedata.normalize("NFD", " ".join(str(name or "").split()).casefold())
+    return "".join(ch for ch in s if not unicodedata.combining(ch))  # και χωρίς τόνους: «Ά» = «α»
 
 
 def now_iso() -> str:
@@ -679,9 +689,9 @@ class Database:
                 )
                 if offers:
                     c.executemany(
-                        "INSERT INTO listing_offers(listing_id, history_id, checked_at, shop, url, price, currency,"
-                        " price_eur, in_stock) VALUES(?,?,?,?,?,?,?,?,?)",
-                        [(listing_id, cur.lastrowid, ts, o["shop"], o.get("url"), o.get("price"), o.get("currency"),
+                        "INSERT INTO listing_offers(listing_id, history_id, checked_at, shop, shop_key, url, price,"
+                        " currency, price_eur, in_stock) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                        [(listing_id, cur.lastrowid, ts, o["shop"], shop_key(o["shop"]), o.get("url"), o.get("price"), o.get("currency"),
                           o.get("price_eur"), None if o.get("in_stock") is None else int(o["in_stock"]))
                          for o in offers])
         return ts
@@ -695,14 +705,15 @@ class Database:
                              (listing_id,)).fetchone()[0]
             if last is None:
                 return []
+            # Με το ευρετήριο (listing_id, shop_key, history_id) κάθε υποερώτημα διαβάζει μόνο ένα κατάστημα
             rows = [dict(x) for x in c.execute(
-                """SELECT * FROM (
-                     SELECT shop, url, price, currency, price_eur, in_stock, checked_at, history_id,
-                            LAG(price_eur) OVER w AS prev_price_eur,
-                            MIN(price_eur) OVER (PARTITION BY shop COLLATE NOCASE) AS min_price_eur
-                     FROM listing_offers WHERE listing_id=?
-                     WINDOW w AS (PARTITION BY shop COLLATE NOCASE ORDER BY history_id))
-                   WHERE history_id=?""", (listing_id, last))]
+                """SELECT o.shop, o.url, o.price, o.currency, o.price_eur, o.in_stock, o.checked_at,
+                          (SELECT p.price_eur FROM listing_offers p WHERE p.listing_id=o.listing_id
+                             AND p.shop_key=o.shop_key AND p.history_id<o.history_id AND p.price_eur IS NOT NULL
+                             ORDER BY p.history_id DESC LIMIT 1) AS prev_price_eur,
+                          (SELECT MIN(m.price_eur) FROM listing_offers m WHERE m.listing_id=o.listing_id
+                             AND m.shop_key=o.shop_key) AS min_price_eur
+                   FROM listing_offers o WHERE o.listing_id=? AND o.history_id=?""", (listing_id, last))]
         rank = {1: 0, None: 1, 0: 2}
         rows.sort(key=lambda o: (rank.get(o["in_stock"], 1),
                                  o["price_eur"] if o["price_eur"] is not None else 1e18, o["shop"].lower()))
@@ -715,8 +726,8 @@ class Database:
              " WHERE listing_id=?")
         args = [listing_id]
         if shop is not None:
-            q += " AND shop=? COLLATE NOCASE"
-            args.append(shop)
+            q += " AND shop_key=?"
+            args.append(shop_key(shop))
         with self.conn() as c:
             return [dict(x) for x in c.execute(q + " ORDER BY history_id, shop", args)]
 

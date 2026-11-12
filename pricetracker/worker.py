@@ -381,7 +381,11 @@ class Worker:
             stock_known = info.in_stock is not None
             in_stock = info.in_stock if stock_known else (info.price is not None)
             # Νόμισμα: αυτό που διάλεξε ο χρήστης (υπερισχύει), αλλιώς από τη σελίδα, αλλιώς από τη χώρα του καταστήματος
-            info.currency = l.get("currency_override") or info.currency or currency_of_country(l.get("country"))
+            if getattr(info, "offers", None):
+                # σελίδα σύγκρισης τιμών: η τιμή της γραμμής είναι η φθηνότερη από τη λίστα, με το δικό της νόμισμα
+                info.currency = info.currency or currency_of_country(l.get("country"))
+            else:
+                info.currency = l.get("currency_override") or info.currency or currency_of_country(l.get("country"))
             if info.price is not None and not info.currency:
                 self._ask_currency(l, product)
             shot = None

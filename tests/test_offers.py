@@ -205,3 +205,43 @@ def test_non_http_offer_links_dropped_and_marketplaces_ignored():
     # Ένα marketplace με πολλούς πωλητές στο JSON-LD κρατά τη δική του τιμή και δεν βγάζει λίστα
     m = extract(_bestprice(offers), "https://www.public.gr/product/1")
     assert m.offers == [] and m.price_source != "offers"
+
+
+def test_greek_case_shop_history_and_route_without_shop(tmp_path):
+    db = Database(tmp_path / "db.sqlite")
+    pid = db.create_product("X")
+    lid = db.add_listing(pid, "https://www.bestprice.gr/item/1/x.html")
+    db.record_check(lid, 1.0, "EUR", True, offers=[{"shop": "ΚΑΤΑΣΤΗΜΑ Α", "price": 12.0, "price_eur": 12.0, "in_stock": True}])
+    db.record_check(lid, 1.0, "EUR", True, offers=[{"shop": "Κατάστημα Α", "price": 10.0, "price_eur": 10.0, "in_stock": True}])
+    assert db.latest_offers(lid)[0]["prev_price_eur"] == 12.0
+    from pricetracker.web import create_app
+    c = create_app(db, Worker(db, tmp_path), tmp_path).test_client()
+    assert len(c.get(f"/api/listings/{lid}/offers").get_json()) == 2
+
+
+def test_skroutz_backorder_card_is_not_available():
+    h = SKROUTZ.replace('<span class="stock">3 τεμάχια</span>', '<span class="stock">Κατόπιν παραγγελίας</span>', 1)
+    i = extract(h, "https://www.skroutz.gr/s/1/x.html")
+    # η πρώτη κάρτα (Pancarshop, προβεβλημένη) είναι κατόπιν παραγγελίας· η δεύτερη ίδια κάρτα όχι → κρατά τη διαθέσιμη
+    assert {o["shop"]: o["in_stock"] for o in i.offers}["Pancarshop"] is True
+    only = SKROUTZ.replace('<span class="stock">3 τεμάχια</span>', '<span class="stock">Κατόπιν παραγγελίας</span>')
+    j = extract(only, "https://www.skroutz.gr/s/1/x.html")
+    assert {o["shop"]: o["in_stock"] for o in j.offers}["Automoto-Eshop"] is False
+
+
+def test_duplicate_seller_keeps_available_cheapest_and_unknown_value_is_unknown():
+    offers = [_bp_offer(1, "Shop X", 200.0, "OutOfStock"), _bp_offer(2, "Shop X", 150.0), _bp_offer(3, "Y", 99.0)]
+    offers[2]["availability"] = "Διαθέσιμο κάπως"
+    i = extract(_bestprice(offers), "https://www.bestprice.gr/item/1/x.html")
+    shops = {o["shop"]: o for o in i.offers}
+    assert shops["Shop X"]["price"] == 150.0 and shops["Shop X"]["in_stock"] is True
+    assert shops["Y"]["in_stock"] is True  # «διαθέσιμο» στο κείμενο → διαθέσιμο, όχι εξαντλημένο
+
+
+def test_excel_offers_sheet_name_not_taken_by_product(tmp_path, monkeypatch):
+    db, pid, lid = _check(tmp_path, monkeypatch, [[A, B]])
+    db.create_product("Skroutz-BestPrice")
+    from openpyxl import load_workbook
+    from pricetracker.export import export_xlsx
+    wb = load_workbook(export_xlsx(db, tmp_path, tmp_path / "x.xlsx"))
+    assert wb["Skroutz-BestPrice"].cell(1, 4).value == "Κατάστημα"
