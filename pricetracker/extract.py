@@ -424,10 +424,43 @@ def _from_jsonld(soup, deep: bool, url: str = "") -> ProductInfo:
             best = min(pool, key=lambda c: c[0])
             p.price, p.currency = best[0], best[1]
             p.in_stock = best[2] if best[2] is not None else (True if any(c[2] for c in cands) else None)
+        if not info.offers:
+            info.offers = _seller_offers(offer_list, url)
         info.merge(p, "jsonld")
         if info.price is not None:
             break
     return info
+
+
+def _seller_offers(offer_list, url: str = "") -> list[dict]:
+    """Σελίδες σύγκρισης τιμών (BestPrice κ.ά.): μια προσφορά ανά κατάστημα μέσα στο JSON-LD (συχνά μέσα σε
+    AggregateOffer). Μετράει μόνο όταν υπάρχουν τουλάχιστον δύο διαφορετικά καταστήματα, ώστε ένα απλό
+    κατάστημα που γράφει τον εαυτό του ως «seller» να μη βγάζει λίστα."""
+    flat = []
+    for o in offer_list:
+        if not isinstance(o, dict):
+            continue
+        inner = o.get("offers")
+        if "aggregateoffer" in _types(o) and inner:
+            flat.extend(x for x in (inner if isinstance(inner, list) else [inner]) if isinstance(x, dict))
+        else:
+            flat.append(o)
+    out, seen = [], set()
+    for o in flat:
+        seller = _first(o.get("seller"))
+        name = seller.get("name") if isinstance(seller, dict) else seller
+        name = " ".join(str(name or "").split())
+        price = _offer_price(o)
+        if not name or price is None or name.lower() in seen:
+            continue
+        seen.add(name.lower())
+        avail = availability_from_schema(o.get("availability"))
+        if avail is None and o.get("availability"):
+            avail = False  # κατόπιν παραγγελίας / προπαραγγελία: όχι διαθέσιμο τώρα
+        out.append({"shop": name, "price": price, "currency": o.get("priceCurrency"), "in_stock": avail,
+                    "url": None, "offer_id": str(o.get("@id") or "").rsplit("-", 1)[-1] or None,
+                    "page_url": o.get("url") if isinstance(o.get("url"), str) else None})
+    return out if len(out) >= 2 else []
 
 
 # ---------------------------------------------------------------- meta / microdata
@@ -529,9 +562,42 @@ def from_ebay(soup, html: str) -> ProductInfo:
     return p
 
 
+def from_skroutz(soup, html) -> ProductInfo:
+    """Skroutz: κάθε κατάστημα είναι μια κάρτα με data-shop-id και data-raw-price. Οι «προβεβλημένες» κάρτες
+    εμφανίζονται δύο φορές, οπότε κρατάμε μία ανά κατάστημα."""
+    p = ProductInfo()
+    seen = set()
+    for c in soup.select("li[data-shop-id][data-raw-price], li[data-shop-id][data-price]"):
+        sid = c.get("data-shop-id")
+        if sid in seen:
+            continue
+        price = parse_price(c.get("data-raw-price") or c.get("data-price"))
+        if price is None:
+            continue
+        img = c.select_one(".merchant-logo img[alt]")
+        name = (img.get("alt") if img else "") or _text(c.select_one(".shop-name, .merchant-name"))
+        name = " ".join((name or "").split())
+        if not name:
+            a = c.select_one("a[href*='/shop/']")
+            m = re.search(r"/shop/\d+/([^/#?]+)", a.get("href", "")) if a else None
+            name = m.group(1).replace("-", " ") if m else f"Κατάστημα {sid}"
+        seen.add(sid)
+        text = _text(c).lower()
+        out = any(w in text for w in OUT_PHRASES)
+        cart = c.select_one(".add-to-cart-btn, button[class*=cart]")
+        cart_ok = cart is not None and not cart.has_attr("disabled")
+        stock = c.select_one(".stock")
+        in_stock = False if out else True if (cart_ok or stock or "παράδοση" in text) else None
+        href = c.get("data-product-url")
+        p.offers.append({"shop": name, "price": price, "currency": "EUR", "in_stock": in_stock,
+                         "url": ("https://www.skroutz.gr" + href) if href and href.startswith("/") else href})
+    return p
+
+
 SITE_RULES = {
     "amazon.": from_amazon,
     "ebay.": from_ebay,
+    "skroutz.gr": from_skroutz,
 }
 
 GENERIC_PRICE_SELECTORS = [
@@ -669,8 +735,12 @@ def extract(html: str, url: str = "") -> ProductInfo:
             if site.blocked:
                 return site
             info.merge(site, key.strip("."))
+            info.offers = site.offers
             break
-    info.merge(from_jsonld(soup, url), "jsonld")
+    jl = from_jsonld(soup, url)
+    info.merge(jl, "jsonld")
+    if not info.offers and jl.offers:
+        info.offers = jl.offers
     info.merge(from_meta(soup), "meta")
     info.merge(from_generic(soup), "generic")
     if info.price is None and _looks_like_challenge(soup, html):
@@ -684,7 +754,33 @@ def extract(html: str, url: str = "") -> ProductInfo:
     if info.title:
         info.title = " ".join(info.title.split())[:300]
     info.image = _undouble_url(info.image)
+    if info.offers:
+        _finish_offers(info, soup, url)
     return info
+
+
+def _finish_offers(info: ProductInfo, soup, url: str):
+    """Σύνδεσμος ανά κατάστημα (π.χ. «/to/<προσφορά>/» του BestPrice) και τιμή της γραμμής = η φθηνότερη
+    ΔΙΑΘΕΣΙΜΗ προσφορά, ώστε η γραμμή να συμφωνεί με τη λίστα καταστημάτων από κάτω."""
+    from urllib.parse import urljoin
+
+    links = {}
+    for a in soup.select("a[href*='/to/']"):
+        m = re.search(r"/to/(\d+)", a.get("href", ""))
+        if m:
+            links.setdefault(m.group(1), urljoin(url or "", a["href"]))
+    for o in info.offers:
+        oid, page = o.pop("offer_id", None), o.pop("page_url", None)
+        if not o.get("url"):
+            # απευθείας σύνδεσμος στο κατάστημα όταν υπάρχει στη σελίδα, αλλιώς η σελίδα του προϊόντος
+            o["url"] = links.get(oid) or page
+        o["currency"] = normalize_currency(o.get("currency")) or info.currency or "EUR"
+    live = [o for o in info.offers if o.get("in_stock")]
+    pool = live or info.offers
+    best = min(pool, key=lambda o: o["price"])
+    info.price, info.currency = best["price"], best["currency"]
+    info.in_stock = True if live else (False if all(o.get("in_stock") is False for o in info.offers) else None)
+    info.price_source = info.price_source or "offers"
 
 
 _DOUBLED_URL = re.compile(r"(https?://([^/?#]+))/+(https?://([^/?#]+)(?:[/?#].*)?)$", re.I)

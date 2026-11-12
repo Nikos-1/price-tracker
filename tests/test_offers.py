@@ -86,3 +86,79 @@ def test_normal_listing_has_no_offers(tmp_path):
     lid = db.add_listing(pid, "https://www.plaisio.gr/p/1")
     db.record_check(lid, 10.0, "EUR", True)
     assert db.latest_offers(lid) == [] and db.all_offers(lid) == []
+
+
+# ---------------------------------------------------------------- ανάγνωση σελίδων
+from pricetracker.extract import extract  # noqa: E402
+
+
+def _sk_card(sid, price, name, stock="3 τεμάχια", cid=None, extra=""):
+    st = f'<div class="merchant-box-bottom-content"><span class="stock">{stock}</span></div>' if stock else ""
+    return f"""<li class="product-card-redesigned" data-shop-id="{sid}" data-raw-price="{price}"
+      data-price="{str(price).replace('.', ',')} €" data-product-url="/products/show/{cid or sid}">
+      <div class="final-price"><span class="integer-part">{int(price)}</span><span class="currency">€</span></div>
+      <div class="product-card-delivery-box">Παράδοση έως Τετ, 18 Νοε</div>{extra}
+      <button class="add-to-cart-btn icon" type="button">Προσθήκη στο καλάθι</button>
+      <div class="merchant-box"><span class="merchant-logo"><img alt="{name}" src="x.jpg"></span></div>{st}</li>"""
+
+
+SKROUTZ = f"""<html><head><script type="application/ld+json">{{"@context":"https://schema.org","@type":"Product",
+  "name":"Topdon V3000","offers":{{"@type":"AggregateOffer","lowPrice":"163.98","priceCurrency":"EUR",
+  "offerCount":3}}}}</script></head><body>
+  <ul class="scroll-area featured-product-card-redesigned">{_sk_card(781, 172.99, "Pancarshop")}</ul>
+  <ul>{_sk_card(24573, 163.98, "Automoto-Eshop")}{_sk_card(781, 172.99, "Pancarshop")}
+  {_sk_card(2413, 179.97, "E-kiriazis", stock=None)}
+  {_sk_card(99, 150.0, "Φθηνό αλλά εξαντλημένο", stock=None, extra="<span>Εξαντλήθηκε</span>")}</ul></body></html>"""
+
+
+def test_skroutz_offers_one_per_shop_and_cheapest_available():
+    i = extract(SKROUTZ, "https://www.skroutz.gr/s/61712243/topdon-v3000.html")
+    shops = {o["shop"]: o for o in i.offers}
+    assert sorted(shops) == ["Automoto-Eshop", "E-kiriazis", "Pancarshop", "Φθηνό αλλά εξαντλημένο"]
+    assert shops["E-kiriazis"]["in_stock"] is True and shops["Φθηνό αλλά εξαντλημένο"]["in_stock"] is False
+    assert shops["Pancarshop"]["url"] == "https://www.skroutz.gr/products/show/781"
+    assert i.price == 163.98 and i.in_stock is True and i.currency == "EUR"
+
+
+def _bp_offer(oid, shop, price, avail="InStock"):
+    return {"@type": "Offer", "url": "https://www.bestprice.gr/item/1/topdon-v3000.html",
+            "seller": {"@type": "Organization", "name": shop, "url": f"https://www.bestprice.gr/m/1/{shop}.html"},
+            "price": f"{price:.2f}", "priceCurrency": "EUR",
+            "@id": f"https://www.bestprice.gr/item/1/topdon-v3000.html#offer-{oid}",
+            "availability": f"https://schema.org/{avail}"}
+
+
+def _bestprice(offers):
+    import json
+    ld = {"@context": "https://schema.org", "@type": "Product", "name": "Topdon V3000",
+          "offers": {"@type": "AggregateOffer", "lowPrice": "160.00", "priceCurrency": "EUR",
+                     "offerCount": len(offers), "offers": offers}}
+    return f"""<html><head><script type="application/ld+json">{json.dumps(ld)}</script></head><body>
+      <a class="button" href="https://www.bestprice.gr/to/201941633/topdon.html?from=1">Στο κατάστημα</a>
+      </body></html>"""
+
+
+def test_bestprice_offers_from_jsonld_with_links_and_backorder():
+    h = _bestprice([_bp_offer(222, "Kassandrinos", 160.0, "BackOrder"), _bp_offer(201941633, "Tool-Market", 167.4),
+                    _bp_offer(333, "inzoom.gr", 281.0)])
+    i = extract(h, "https://www.bestprice.gr/item/1/topdon-v3000.html")
+    shops = {o["shop"]: o for o in i.offers}
+    assert shops["Kassandrinos"]["in_stock"] is False  # κατόπιν παραγγελίας: όχι διαθέσιμο τώρα
+    assert shops["Tool-Market"]["url"] == "https://www.bestprice.gr/to/201941633/topdon.html?from=1"
+    assert shops["inzoom.gr"]["url"] == "https://www.bestprice.gr/item/1/topdon-v3000.html"
+    assert i.price == 167.4 and i.in_stock is True  # η φθηνότερη ΔΙΑΘΕΣΙΜΗ, όχι το lowPrice
+
+
+def test_single_seller_jsonld_is_not_a_comparison_list():
+    import json
+    ld = {"@type": "Product", "name": "X", "offers": {"@type": "Offer", "price": "10.00", "priceCurrency": "EUR",
+                                                      "seller": {"name": "Το κατάστημά μου"},
+                                                      "availability": "https://schema.org/InStock"}}
+    i = extract(f'<script type="application/ld+json">{json.dumps(ld)}</script>', "https://shop.gr/p")
+    assert i.offers == [] and i.price == 10.0
+
+
+def test_all_offers_out_of_stock():
+    h = _bestprice([_bp_offer(1, "Α", 100.0, "OutOfStock"), _bp_offer(2, "Β", 90.0, "OutOfStock")])
+    i = extract(h, "https://www.bestprice.gr/item/1/x.html")
+    assert i.in_stock is False and i.price == 90.0
