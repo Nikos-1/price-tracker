@@ -172,3 +172,15 @@ def test_you_gr_results_without_product_url_hints():
     got = find_candidates(html, "https://www.you.gr/special-pages/searchq?query=LIAN-LI+O11", LIAN)
     assert [c["url"] for c in got] == ["https://www.you.gr/anavathmisi-diktyaka/anavathmisi/koutia-ypologisti-pc-"
                                        "cases/lian-li-pc-o11-dynamic-evo-xl-full-tower-black"]
+
+
+def test_slug_fallback_rejects_brand_and_category_pages():
+    from pricetracker.search import _drop_search_params, _slug_matches, _slug_words
+
+    words = _slug_words(tokens(LIAN), None)
+    assert not _slug_matches("https://x.gr/cases/lian-li-fans-rgb", [], words)
+    assert not _slug_matches("https://x.gr/lian-li-o11-series", ["o11"], words)
+    assert _slug_matches("https://x.gr/c/lian-li-o11-dynamic-evo-xl", ["o11"], words)
+    words = _slug_words(tokens("Corsair Corsair Gold RM850x"), "Corsair")
+    assert not _slug_matches("https://x.gr/corsair-gold-x", [], words)
+    assert _drop_search_params("https://x.gr/p-a-b?id=1&query=foo&q=2") == "https://x.gr/p-a-b?id=1"
