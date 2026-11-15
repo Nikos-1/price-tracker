@@ -267,6 +267,29 @@ def _looks_like_product(url: str) -> bool:
     return any(re.search(p, path) for p in PRODUCT_URL_HINTS)
 
 
+def _slug_matches(url: str, models: list[str], q_tokens: list[str]) -> bool:
+    """Διεύθυνση προϊόντος χωρίς τα συνηθισμένα σημάδια (/p/, .html, αριθμό), όπως στο you.gr
+    («/koutia-ypologisti-pc-cases/lian-li-pc-o11-dynamic-evo-xl-full-tower-black»): το τελευταίο κομμάτι της
+    διεύθυνσης περιγράφει το ίδιο το προϊόν, δηλαδή έχει τον κωδικό μοντέλου ή τουλάχιστον 3 λέξεις του τίτλου."""
+    path = urlparse(url).path
+    if any(re.search(p, path) for p in NON_PRODUCT_HINTS):
+        return False
+    slug = path.rstrip("/").rsplit("/", 1)[-1].lower()
+    if slug.count("-") < 2:
+        return False
+    if models and all(_has_code(m, slug) for m in models):
+        return True
+    parts = set(slug.split("-"))
+    latin = [t for t in q_tokens if re.fullmatch(r"[a-z0-9-]+", t)]
+    return len(latin) >= 3 and sum(all(x in parts for x in t.split("-")) for t in latin) >= 3
+
+
+# Παράμετροι που προσθέτει η σελίδα αποτελεσμάτων στους συνδέσμους (π.χ. «?query=…» στο you.gr): δεν ανήκουν
+# στη διεύθυνση του προϊόντος και θα έκαναν το ίδιο προϊόν να φαίνεται σαν άλλο
+_SEARCH_LINK_PARAMS = {"query", "q", "search", "searchterm", "search_query", "keyword", "keywords", "term", "sr",
+                       "searchquery", "search_text"}
+
+
 def _clean_url(url: str, host: str) -> str:
     # Amazon: κράτα μόνο /dp/ASIN
     if "amazon." in host:
@@ -279,6 +302,10 @@ def _clean_url(url: str, host: str) -> str:
         if m:
             p = urlparse(url)
             return f"{p.scheme}://{p.netloc}/itm/{m.group(1)}"
+    p = urlparse(url.split("#")[0])
+    if p.query:
+        kept = [kv for kv in p.query.split("&") if kv.split("=", 1)[0].lower() not in _SEARCH_LINK_PARAMS]
+        return p._replace(query="&".join(kept)).geturl()
     return url.split("#")[0]
 
 
@@ -306,7 +333,7 @@ def find_candidates(html: str, page_url: str, title: str, ean=None, mpn=None, br
         uhost = host_of(url)
         if not (domain_matches(uhost, host) or domain_matches(host, uhost)):
             continue
-        if not selectors and not _looks_like_product(url):
+        if not selectors and not _looks_like_product(url) and not _slug_matches(url, models, q_tokens):
             continue
         text = " ".join((a.get("title") or a.get("aria-label") or a.get_text(" ") or "").split())
         if not text:

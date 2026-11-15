@@ -159,3 +159,16 @@ def test_you_gr_search_url_fixed_on_upgrade(tmp_path):
     assert db.get_shop(sid)["search_url"] == good
     db.update_shop(sid, search_url="https://www.you.gr/my?x={q}")  # δικό του URL: δεν αλλάζει
     assert Database(tmp_path / "db.sqlite").get_shop(sid)["search_url"] == "https://www.you.gr/my?x={q}"
+
+
+def test_you_gr_results_without_product_url_hints():
+    html = ('<html><head><title>Αναζήτηση | You.gr</title></head><body>'
+            '<a href="/anavathmisi-diktyaka/anavathmisi/koutia-ypologisti-pc-cases">Κουτιά Υπολογιστή PC Cases</a>'
+            '<a href="/anavathmisi-diktyaka/anavathmisi/koutia-ypologisti-pc-cases/lian-li-pc-o11-dynamic-evo-xl-full-'
+            'tower-black?query=LIAN-LI%20O11%20DYNAMIC%20EVO%20XL">Lian Li PC-O11 Dynamic EVO XL Full Tower Black</a>'
+            '<a href="/anavathmisi-diktyaka/anavathmisi/koutia-ypologisti-pc-cases/lian-li-o11-dynamic-mini-black'
+            '?query=x">Lian Li O11 Dynamic Mini Black</a>'
+            "</body></html>")
+    got = find_candidates(html, "https://www.you.gr/special-pages/searchq?query=LIAN-LI+O11", LIAN)
+    assert [c["url"] for c in got] == ["https://www.you.gr/anavathmisi-diktyaka/anavathmisi/koutia-ypologisti-pc-"
+                                       "cases/lian-li-pc-o11-dynamic-evo-xl-full-tower-black"]
