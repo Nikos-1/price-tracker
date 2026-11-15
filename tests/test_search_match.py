@@ -159,3 +159,28 @@ def test_you_gr_search_url_fixed_on_upgrade(tmp_path):
     assert db.get_shop(sid)["search_url"] == good
     db.update_shop(sid, search_url="https://www.you.gr/my?x={q}")  # δικό του URL: δεν αλλάζει
     assert Database(tmp_path / "db.sqlite").get_shop(sid)["search_url"] == "https://www.you.gr/my?x={q}"
+
+
+def test_you_gr_results_without_product_url_hints():
+    html = ('<html><head><title>Αναζήτηση | You.gr</title></head><body>'
+            '<a href="/anavathmisi-diktyaka/anavathmisi/koutia-ypologisti-pc-cases">Κουτιά Υπολογιστή PC Cases</a>'
+            '<a href="/anavathmisi-diktyaka/anavathmisi/koutia-ypologisti-pc-cases/lian-li-pc-o11-dynamic-evo-xl-full-'
+            'tower-black?query=LIAN-LI%20O11%20DYNAMIC%20EVO%20XL">Lian Li PC-O11 Dynamic EVO XL Full Tower Black</a>'
+            '<a href="/anavathmisi-diktyaka/anavathmisi/koutia-ypologisti-pc-cases/lian-li-o11-dynamic-mini-black'
+            '?query=x">Lian Li O11 Dynamic Mini Black</a>'
+            "</body></html>")
+    got = find_candidates(html, "https://www.you.gr/special-pages/searchq?query=LIAN-LI+O11", LIAN)
+    assert [c["url"] for c in got] == ["https://www.you.gr/anavathmisi-diktyaka/anavathmisi/koutia-ypologisti-pc-"
+                                       "cases/lian-li-pc-o11-dynamic-evo-xl-full-tower-black"]
+
+
+def test_slug_fallback_rejects_brand_and_category_pages():
+    from pricetracker.search import _drop_search_params, _slug_matches, _slug_words
+
+    words = _slug_words(tokens(LIAN), None)
+    assert not _slug_matches("https://x.gr/cases/lian-li-fans-rgb", [], words)
+    assert not _slug_matches("https://x.gr/lian-li-o11-series", ["o11"], words)
+    assert _slug_matches("https://x.gr/c/lian-li-o11-dynamic-evo-xl", ["o11"], words)
+    words = _slug_words(tokens("Corsair Corsair Gold RM850x"), "Corsair")
+    assert not _slug_matches("https://x.gr/corsair-gold-x", [], words)
+    assert _drop_search_params("https://x.gr/p-a-b?id=1&query=foo&q=2") == "https://x.gr/p-a-b?id=1"

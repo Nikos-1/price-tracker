@@ -267,6 +267,52 @@ def _looks_like_product(url: str) -> bool:
     return any(re.search(p, path) for p in PRODUCT_URL_HINTS)
 
 
+_NOT_PRODUCT_SLUG = {"series", "seira", "accessories", "aksesouar", "axesouar", "category", "categories", "kategoria",
+                     "katigoria", "collection", "brand", "brands", "all", "ola", "products", "proionta"}
+
+
+def _slug_matches(url: str, models: list[str], words: set[str]) -> bool:
+    """Διεύθυνση προϊόντος χωρίς τα συνηθισμένα σημάδια (/p/, .html, αριθμό), όπως στο you.gr
+    («/koutia-ypologisti-pc-cases/lian-li-pc-o11-dynamic-evo-xl-full-tower-black»): το τελευταίο κομμάτι της
+    διεύθυνσης περιγράφει το ίδιο το προϊόν, δηλαδή έχει τον κωδικό μοντέλου ή τουλάχιστον 3 διαφορετικές λέξεις
+    του τίτλου (εκτός από τη μάρκα). `words`: οι λατινικές λέξεις του τίτλου χωρίς τη μάρκα."""
+    p = urlparse(url)
+    if any(re.search(x, p.path + ("?" + p.query if p.query else "")) for x in NON_PRODUCT_HINTS):
+        return False
+    slug = p.path.rstrip("/").rsplit("/", 1)[-1].lower()
+    parts = set(slug.split("-"))
+    if slug.count("-") < 2 or parts & _NOT_PRODUCT_SLUG:
+        return False
+    if models and all(_has_code(m, slug) for m in models):
+        return True
+    return len(words & parts) >= 3
+
+
+def _slug_words(q_tokens: list[str], brand: str | None) -> set[str]:
+    brand_parts = set(re.split(r"[\s\-]+", normalize(brand or ""))) - {""}
+    out = set()
+    for t in q_tokens:
+        if re.fullmatch(r"[a-z0-9-]+", t):
+            out |= set(t.split("-"))
+    # χωρίς τη μάρκα: «lian-li-fans-rgb» δεν είναι το O11 μόνο επειδή έχει «lian» και «li»
+    if not brand_parts and q_tokens:
+        brand_parts = set(q_tokens[0].split("-"))
+    return {w for w in out - brand_parts if len(w) >= 2}
+
+
+def _drop_search_params(url: str) -> str:
+    """Βγάζει τις παραμέτρους αναζήτησης που προσθέτει η σελίδα αποτελεσμάτων στους συνδέσμους (π.χ. «?query=…»
+    στο you.gr), ώστε το ίδιο προϊόν να έχει πάντα την ίδια διεύθυνση."""
+    from urllib.parse import parse_qsl, urlencode
+
+    params = {n.lower() for n in SEARCH_PARAM_NAMES} - {"s", "k", "w"}
+    p = urlparse(url)
+    if not p.query:
+        return url
+    kept = [(k, v) for k, v in parse_qsl(p.query, keep_blank_values=True) if k.lower() not in params]
+    return p._replace(query=urlencode(kept)).geturl()
+
+
 def _clean_url(url: str, host: str) -> str:
     # Amazon: κράτα μόνο /dp/ASIN
     if "amazon." in host:
@@ -297,6 +343,7 @@ def find_candidates(html: str, page_url: str, title: str, ean=None, mpn=None, br
     q_tokens = tokens(" ".join(filter(None, [brand, title])))
     codes = [c for c in (ean, mpn) if c]
     models = model_codes(title or "")
+    slug_words = _slug_words(q_tokens, brand)
     seen = {}
     for a in anchors:
         href = a.get("href")
@@ -306,8 +353,11 @@ def find_candidates(html: str, page_url: str, title: str, ean=None, mpn=None, br
         uhost = host_of(url)
         if not (domain_matches(uhost, host) or domain_matches(host, uhost)):
             continue
+        by_slug = False
         if not selectors and not _looks_like_product(url):
-            continue
+            if not _slug_matches(url, models, slug_words):
+                continue
+            by_slug = True
         text = " ".join((a.get("title") or a.get("aria-label") or a.get_text(" ") or "").split())
         if not text:
             img = a.find("img")
@@ -318,6 +368,8 @@ def find_candidates(html: str, page_url: str, title: str, ean=None, mpn=None, br
         if sc < min_score:
             continue
         url = _clean_url(url, uhost)
+        if by_slug:
+            url = _drop_search_params(url)
         if url not in seen or seen[url]["score"] < sc:
             seen[url] = {"url": url, "title": text[:250], "score": sc}
     return sorted(seen.values(), key=lambda d: -d["score"])[:limit]
