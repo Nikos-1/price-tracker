@@ -35,3 +35,14 @@ def test_change_product_sector(tmp_path):
     assert c.get(f"/api/products/{pid}").get_json()["all_shops"] == 1
     c.put(f"/api/products/{pid}", json={"sector_id": ""})  # ξανά όπως η κατηγορία
     assert listed()["sector_name"] == "Τεστ Ηλεκτρικά" and db.product_sector(pid) == elec
+
+
+def test_inherit_follows_category_later(tmp_path):
+    db = Database(tmp_path / "db.sqlite")
+    c = create_app(db, FW(), tmp_path).test_client()
+    cat = db.create_category("Χωρίς γενική")
+    pid = db.create_product("P", cat)
+    c.put(f"/api/products/{pid}", json={"name": "P2", "sector_id": ""})  # η προεπιλογή της φόρμας
+    sec = db.create_sector("Τεστ Εργαλεία")
+    db.set_category_sector(cat, sec)
+    assert db.product_sector(pid) == sec and db.get_product(pid)["sector_name"] == "Τεστ Εργαλεία"
