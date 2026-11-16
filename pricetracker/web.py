@@ -364,9 +364,13 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None, exports_dir
         return jsonify({"id": pid})
 
     def apply_sector(pid, cat, sector_id):
-        """Γενική κατηγορία προϊόντος. Αν η κατηγορία του δεν έχει ακόμα, τη «μαθαίνει» κι αυτή για την επόμενη φορά."""
+        """Γενική κατηγορία προϊόντος: "" = όπως η κατηγορία του, "all" = όλα τα καταστήματα (ακόμα κι αν η
+        κατηγορία έχει γενική κατηγορία), αλλιώς το id. Αν η κατηγορία του δεν έχει ακόμα, τη «μαθαίνει» κι αυτή."""
+        if sector_id == "all":
+            db.update_product(pid, sector_id=None, all_shops=1)
+            return
         sid = _cat(sector_id)
-        db.update_product(pid, sector_id=sid)
+        db.update_product(pid, sector_id=sid, all_shops=0)
         if sid and cat:
             c = next((x for x in db.list_categories() if x["id"] == cat), None)
             if c and not c.get("sector_id"):

@@ -114,10 +114,15 @@ CREATE TABLE IF NOT EXISTS receipts (
 );
 """
 
+# Η γενική κατηγορία ενός προϊόντος: η δική του, αλλιώς της κατηγορίας του, εκτός αν διάλεξες «Όλα τα καταστήματα»
+SECTOR_NAME_SQL = "CASE WHEN p.all_shops THEN NULL ELSE COALESCE(sp.name, sc.name) END AS sector_name"
+
 # Στήλες που προστέθηκαν σε νεότερες εκδόσεις (για βάσεις που υπάρχουν ήδη)
 MIGRATIONS = {
     "products": [("receipt_id", "INTEGER REFERENCES receipts(id) ON DELETE SET NULL"),
-                 ("warranty_months", "INTEGER"), ("sector_id", "INTEGER REFERENCES sectors(id) ON DELETE SET NULL")],
+                 ("warranty_months", "INTEGER"), ("sector_id", "INTEGER REFERENCES sectors(id) ON DELETE SET NULL"),
+                 # 1 = «Όλα τα καταστήματα» ακόμα κι αν η κατηγορία του έχει γενική κατηγορία
+                 ("all_shops", "INTEGER NOT NULL DEFAULT 0")],
     "categories": [("sector_id", "INTEGER REFERENCES sectors(id) ON DELETE SET NULL")],
     "shops": [("country", "TEXT")],
     "listings": [("last_price_eur", "REAL"), ("currency_override", "TEXT"), ("currency_asked", "INTEGER")],
@@ -370,7 +375,8 @@ class Database:
     def product_sector(self, product_id: int):
         """Η γενική κατηγορία του προϊόντος, ή αυτή της κατηγορίας του."""
         with self.conn() as c:
-            r = c.execute("""SELECT COALESCE(p.sector_id, c.sector_id) AS sid FROM products p
+            r = c.execute("""SELECT CASE WHEN p.all_shops THEN NULL ELSE COALESCE(p.sector_id, c.sector_id) END AS sid
+                             FROM products p
                              LEFT JOIN categories c ON c.id = p.category_id WHERE p.id=?""", (product_id,)).fetchone()
         return r["sid"] if r else None
 
@@ -556,7 +562,7 @@ class Database:
     def update_product(self, product_id: int, **fields):
         allowed = {"name", "category_id", "target_price", "notes", "ean", "mpn", "brand", "image_url",
                    "purchased", "purchased_at", "purchased_price", "purchased_shop", "receipt_id",
-                   "warranty_months", "sector_id"}
+                   "warranty_months", "sector_id", "all_shops"}
         fields = {k: v for k, v in fields.items() if k in allowed}
         if not fields:
             return
@@ -571,7 +577,7 @@ class Database:
     def get_product(self, product_id: int):
         with self.conn() as c:
             r = c.execute(
-                """SELECT p.*, c.name AS category_name, COALESCE(sp.name, sc.name) AS sector_name FROM products p
+                f"""SELECT p.*, c.name AS category_name, {SECTOR_NAME_SQL} FROM products p
                    LEFT JOIN categories c ON c.id = p.category_id
                    LEFT JOIN sectors sp ON sp.id = p.sector_id LEFT JOIN sectors sc ON sc.id = c.sector_id
                    WHERE p.id=?""",
@@ -580,8 +586,10 @@ class Database:
         return dict(r) if r else None
 
     def list_products(self, category_id=None, purchased=None):
-        q = """SELECT p.*, c.name AS category_name FROM products p
-               LEFT JOIN categories c ON c.id = p.category_id WHERE 1=1"""
+        # και η γενική κατηγορία, για να φαίνεται στη λίστα (πριν φαινόταν μόνο στη σελίδα του προϊόντος)
+        q = f"""SELECT p.*, c.name AS category_name, {SECTOR_NAME_SQL} FROM products p
+               LEFT JOIN categories c ON c.id = p.category_id
+               LEFT JOIN sectors sp ON sp.id = p.sector_id LEFT JOIN sectors sc ON sc.id = c.sector_id WHERE 1=1"""
         args = []
         if category_id is not None:
             if category_id == 0:

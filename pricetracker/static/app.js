@@ -187,8 +187,12 @@ async function pickedCategory(m, id) {
 // Π.χ. «Ηλεκτρικές συσκευές», «Ρούχα». Ένα προϊόν με γενική κατηγορία ψάχνεται μόνο σε καταστήματα αυτής της
 // κατηγορίας και σε όσα δεν έχουν δηλωμένη καμία (π.χ. BestPrice, Amazon).
 async function loadSectors() { state.sectors = await api("GET", "/api/sectors"); return state.sectors; }
-function sectorPicker(id, selected) {
-  return `<select id="${id}"><option value="">Όλα τα καταστήματα</option>` +
+// selected: id γενικής κατηγορίας, "all" (όλα τα καταστήματα) ή "" (όπως η κατηγορία του προϊόντος)
+function sectorPicker(id, selected, catId) {
+  const cs = (state.sectors || []).find((x) => x.id === catSector(catId));
+  return `<select id="${id}">` +
+    (cs ? `<option value="" ${!selected ? "selected" : ""}>Όπως η κατηγορία (${esc(cs.name)})</option>` : "") +
+    `<option value="all" ${selected === "all" || (!selected && !cs) ? "selected" : ""}>Όλα τα καταστήματα</option>` +
     (state.sectors || []).map((x) => `<option value="${x.id}" ${x.id === selected ? "selected" : ""}>${esc(x.name)}</option>`).join("") +
     `<option value="__new">+ Νέα γενική κατηγορία…</option></select>
     <input id="${id}-new" placeholder="Όνομα νέας γενικής κατηγορίας" style="display:none;margin-top:6px">`;
@@ -200,6 +204,9 @@ function bindSectorPicker(m, id, catId) {
   const cat = catId && $("#" + catId, m);
   if (cat) cat.addEventListener("change", () => {
     const c = state.categories.find((x) => String(x.id) === cat.value);
+    const inherit = sel.querySelector('option[value=""]');
+    const cs = c && (state.sectors || []).find((x) => x.id === c.sector_id);
+    if (inherit) inherit.textContent = cs ? `Όπως η κατηγορία (${cs.name})` : "Όπως η κατηγορία (όλα τα καταστήματα)";
     if (c && c.sector_id) { sel.value = c.sector_id; sel.onchange(); }
   });
 }
@@ -280,7 +287,7 @@ async function editProduct(p) {
     <label>Όνομα</label><input id="ep-name" value="${esc(p.name)}">
     <div class="two"><div><label>Κατηγορία</label>${categoryPicker("ep-cat", p.category_id)}</div>
     <div><label>Τιμή-στόχος (€)</label><input id="ep-target" value="${p.target_price ?? ""}" placeholder="π.χ. 99,90"></div></div>
-    <label>Γενική κατηγορία (σε ποια καταστήματα να ψάχνεται)</label>${sectorPicker("ep-sec", p.sector_id || catSector(p.category_id))}${SECTOR_HINT}
+    <label>Γενική κατηγορία (σε ποια καταστήματα να ψάχνεται)</label>${sectorPicker("ep-sec", p.all_shops ? "all" : p.sector_id || "", p.category_id)}${SECTOR_HINT}
     <label>Σημειώσεις</label><textarea id="ep-notes" rows="3">${esc(p.notes || "")}</textarea>
     <div class="btns"><button data-close>Άκυρο</button><button class="primary" id="ep-save">Αποθήκευση</button></div>`,
     { onMount: (m, close) => {
