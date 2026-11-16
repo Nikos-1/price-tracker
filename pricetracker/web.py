@@ -662,6 +662,14 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None, exports_dir
         for k in ("smtp_port", "warranty_reminder_days"):
             if k in b:
                 b[k] = int(b[k] or 0)
+        if "search_parallel" in b:
+            try:
+                v = int(b["search_parallel"])
+            except (TypeError, ValueError):
+                raise ValueError("Τα καταστήματα που ψάχνονται ταυτόχρονα πρέπει να είναι αριθμός από 1 έως 8") from None
+            if not 1 <= v <= 8:
+                raise ValueError("Τα καταστήματα που ψάχνονται ταυτόχρονα πρέπει να είναι από 1 έως 8")
+            b["search_parallel"] = v
         for k, label in (("bf_start", "η αρχή"), ("bf_end", "το τέλος")):
             if k in b:
                 if not str(b[k] or "").strip():
