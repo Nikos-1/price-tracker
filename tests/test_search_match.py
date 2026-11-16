@@ -184,3 +184,39 @@ def test_slug_fallback_rejects_brand_and_category_pages():
     words = _slug_words(tokens("Corsair Corsair Gold RM850x"), "Corsair")
     assert not _slug_matches("https://x.gr/corsair-gold-x", [], words)
     assert _drop_search_params("https://x.gr/p-a-b?id=1&query=foo&q=2") == "https://x.gr/p-a-b?id=1"
+
+
+def test_search_runs_shops_in_parallel_batches(tmp_path, monkeypatch):
+    db = Database(tmp_path / "db.sqlite")
+    w = Worker(db, tmp_path)
+    keep = [s for s in db.list_shops() if s.get("search_url")][:5]
+    for s in db.list_shops():
+        db.update_shop(s["id"], search_enabled=1 if s in keep else 0)
+    pid = db.create_product(LIAN)
+    hit_host = keep[2]["domain"]
+    batches = []
+    hit = ('<html><body><a href="/p/123456">Lian Li O11 Dynamic EVO XL Black</a>' + "x" * 600 + "</body></html>")
+    empty = "<html><body>" + "x" * 600 + "</body></html>"
+
+    class Page:
+        def close(self):
+            pass
+
+    class Br:
+        def open_many(self, urls):
+            batches.append(urls)
+            return [(Page(), PageResult(u, u, hit if hit_host in u else empty, 200)) for u in urls]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(w, "_browser", lambda: Br())
+    w.search_product(pid)
+    assert len(batches[0]) == 4  # 4 καταστήματα μαζί
+    assert all(len(b) <= 4 for b in batches)
+    # 2 αναζητήσεις στα 4 που δεν το έχουν, 1 σε αυτό που το βρήκε αμέσως
+    assert sum(len(b) for b in batches) == 4 * 2 + 1
+    assert any(hit_host in l["url"] for l in db.list_listings(product_id=pid, status="candidate"))

@@ -245,6 +245,65 @@ class Browser:
                          status=resp.status if resp else None)
         return page, res
 
+    def open_many(self, urls: list[str], timeout_ms: int = 45000, idle_ms: int = 2500) -> list:
+        """Ανοίγει πολλές σελίδες ΤΑΥΤΟΧΡΟΝΑ (μία καρτέλα η καθεμία) και επιστρέφει για την καθεμία
+        (page, PageResult) ή την εξαίρεση. Ο χρόνος χάνεται στην αναμονή των sites, οπότε 4 καρτέλες μαζί
+        τελειώνουν σχεδόν όσο γρήγορα και μία. Ο καλών κλείνει τις σελίδες."""
+        started = []
+        for url in urls:
+            self._polite_wait(url)
+            try:
+                page = self._context.new_page()
+            except Exception as e:  # noqa: BLE001
+                started.append((None, url, e, None))
+                continue
+            status: dict = {}
+
+            def on_response(r, page=page, status=status):
+                try:
+                    if "code" not in status and r.request.is_navigation_request() and r.frame == page.main_frame:
+                        status["code"] = r.status
+                except Exception:  # noqa: BLE001
+                    pass
+
+            page.on("response", on_response)
+            try:
+                # Χωρίς αναμονή: η πλοήγηση ξεκινά και ο browser φορτώνει όλες τις καρτέλες μαζί
+                page.evaluate("u => { window.location.href = u; }", url)
+                started.append((page, url, None, status))
+            except Exception as e:  # noqa: BLE001
+                started.append((page, url, e, None))
+        out = []
+        deadline = time.time() + timeout_ms / 1000
+        for page, url, error, status in started:
+            if error is not None:
+                if page is not None:
+                    try:
+                        page.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                out.append(error)
+                continue
+            try:
+                left = max(1000, int((deadline - time.time()) * 1000))
+                page.wait_for_url(lambda u: not u.startswith("about:"), timeout=left)
+                page.wait_for_load_state("domcontentloaded", timeout=left)
+                try:
+                    page.wait_for_load_state("networkidle", timeout=idle_ms)
+                except Exception:  # noqa: BLE001
+                    pass
+                self._accept_cookies(page)
+                page.wait_for_timeout(300)
+                out.append((page, PageResult(url=url, final_url=page.url, html=page.content(),
+                                             status=status.get("code"))))
+            except Exception as e:  # noqa: BLE001
+                try:
+                    page.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                out.append(e)
+        return out
+
     @staticmethod
     def screenshot(page, path: Path, shop: str, title: str, price: str, when: str):
         path.parent.mkdir(parents=True, exist_ok=True)
