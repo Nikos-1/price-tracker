@@ -184,3 +184,40 @@ def test_slug_fallback_rejects_brand_and_category_pages():
     words = _slug_words(tokens("Corsair Corsair Gold RM850x"), "Corsair")
     assert not _slug_matches("https://x.gr/corsair-gold-x", [], words)
     assert _drop_search_params("https://x.gr/p-a-b?id=1&query=foo&q=2") == "https://x.gr/p-a-b?id=1"
+
+
+def test_failed_detection_keeps_search_url(tmp_path, monkeypatch):
+    db = Database(tmp_path / "db.sqlite")
+    w = Worker(db, tmp_path)
+    sid = next(s["id"] for s in db.list_shops() if s["key"] == "you_gr")
+    good = db.get_shop(sid)["search_url"]
+
+    class Br:
+        def open(self, url, **k):
+            raise RuntimeError("offline")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(w, "_browser", lambda: Br())
+    w.detect_search(sid, replace=True)
+    assert db.get_shop(sid)["search_url"] == good  # η αποτυχία δεν σβήνει το URL
+    # Κενό URL σε προεπιλεγμένο κατάστημα με γνωστό URL: μπαίνει κατευθείαν, χωρίς εύρεση
+    db.update_shop(sid, search_url="", search_enabled=0)
+    queued = []
+    monkeypatch.setattr(w, "enqueue", lambda *a, **k: queued.append(k.get("shop_id")))
+    w.detect_new_default_shops()
+    assert db.get_shop(sid)["search_url"] == good and sid not in queued
+
+
+def test_import_does_not_restore_bad_you_gr_url():
+    from pricetracker.shops import fixed_search_url
+
+    good = "https://www.you.gr/special-pages/searchq?query={q}"
+    assert fixed_search_url("you.gr", "https://www.you.gr/?s={q}&post_type=product") == good
+    assert fixed_search_url("you.gr", "") == good
+    assert fixed_search_url("you.gr", "https://www.you.gr/x?q={q}") == "https://www.you.gr/x?q={q}"
+    assert fixed_search_url("plaisio.gr", "") == ""
