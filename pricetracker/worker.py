@@ -56,6 +56,7 @@ def _interleave_by_host(listings: list[dict]) -> list[dict]:
 
 
 DETECT_RETRY_S = 30 * 86400
+BROKEN_RETRY_S = 7 * 86400  # κατάστημα με «χαλασμένη» αναζήτηση: ξαναδοκιμάζεται μετά από μια εβδομάδα
 
 
 def _detect_tried(settings) -> dict[str, float]:
@@ -787,7 +788,8 @@ class Worker:
         στο «Υγεία». Κρατιέται και το URL: μόλις το διορθώσεις, η ειδοποίηση φεύγει μόνη της. True αν άλλαξε κάτι."""
         key = shop["key"]
         if broken:
-            if (cur.get(key) or {}).get("url") == shop["search_url"]:
+            old = cur.get(key) or {}
+            if old.get("url") == shop["search_url"] and time.time() - float(old.get("at") or 0) < BROKEN_RETRY_S:
                 return False
             cur[key] = {"name": shop["name"], "url": shop["search_url"], "at": time.time()}
             return True
@@ -829,14 +831,18 @@ class Worker:
         if not isinstance(broken_now, dict):
             broken_now = {}
         # Καταστήματα με URL αναζήτησης που ξέρουμε ότι ανοίγει την αρχική: δεν ψάχνονται μέχρι να το διορθώσεις
-        # (φαίνονται στο «Υγεία»)
-        skipped = [s for s in shops if (broken_now.get(s["key"]) or {}).get("url") == s["search_url"]]
+        # (φαίνονται στο «Υγεία»). Μετά από μια εβδομάδα ξαναδοκιμάζονται, μήπως ήταν κάτι προσωρινό.
+        def known_broken(sh):
+            b = broken_now.get(sh["key"]) or {}
+            return b.get("url") == sh["search_url"] and time.time() - float(b.get("at") or 0) < BROKEN_RETRY_S
+        skipped = [s for s in shops if known_broken(s)]
         shops = [s for s in shops if s not in skipped]
         if skipped:
             self._log("Παραλείπονται (λάθος URL αναζήτησης): " + ", ".join(s["name"] for s in skipped))
         broken_changed = False
         try:
-            parallel = max(1, min(8, int(settings.get("search_parallel") or 4)))
+            v = settings.get("search_parallel")
+            parallel = max(1, min(8, int(4 if v is None or v == "" else v)))
         except (TypeError, ValueError):
             parallel = 4
         self.status.update(task=(f"{label}: " if label else "") + f"Αναζήτηση «{query}»", progress=0,
@@ -879,17 +885,20 @@ class Worker:
                     self.status["progress"] = done
                     if st.get("failed"):
                         continue
-                    if cands or not st["homes"]:  # η αναζήτηση δουλεύει (έστω και χωρίς αποτελέσματα)
-                        broken_changed |= self._mark_search_broken(broken_now, s, False)
-                    elif st["homes"] >= 2 or st["homes"] == st["q"]:
-                        if self._mark_search_broken(broken_now, s, True):
-                            broken_changed = True
-                            self._log(f"{s['name']}: η αναζήτηση ανοίγει την αρχική σελίδα – έλεγξε το URL αναζήτησης")
-                    for c in cands:
-                        self.db.add_listing(product_id, c["url"], status="candidate", title=c["title"])
-                        found += 1
-                    if cands:
-                        new_shops.append(s["name"])
+                    try:
+                        if cands or not st["homes"]:  # η αναζήτηση δουλεύει (έστω και χωρίς αποτελέσματα)
+                            broken_changed |= self._mark_search_broken(broken_now, s, False)
+                        elif st["homes"] >= 2 or st["homes"] == st["q"]:
+                            if self._mark_search_broken(broken_now, s, True):
+                                broken_changed = True
+                                self._log(f"{s['name']}: η αναζήτηση ανοίγει την αρχική σελίδα – έλεγξε το URL αναζήτησης")
+                        for c in cands:
+                            self.db.add_listing(product_id, c["url"], status="candidate", title=c["title"])
+                            found += 1
+                        if cands:
+                            new_shops.append(s["name"])
+                    except Exception as e:  # noqa: BLE001 - ένα κατάστημα δεν σταματά την αναζήτηση στα υπόλοιπα
+                        self._log(f"Αναζήτηση στο {s['name']} απέτυχε: {str(e).splitlines()[0][:200]}")
         if broken_changed:
             self.db.set_settings({"search_broken": broken_now})
         self._log(f"Βρέθηκαν {found} πιθανές αντιστοιχίες – έλεγξέ τις στο προϊόν")

@@ -223,32 +223,49 @@ class Browser:
         if clicked:
             page.wait_for_timeout(500)
 
+    def _finish(self, page, url: str, status, deadline: float, idle_ms: int, pause_ms: int) -> PageResult:
+        """Κοινό τέλος για open/open_many: αναμονή να ηρεμήσει το δίκτυο, cookies, ανάγνωση της σελίδας."""
+        try:
+            page.wait_for_load_state("networkidle", timeout=max(500, min(idle_ms, int((deadline - time.time()) * 1000))))
+        except Exception:  # noqa: BLE001
+            pass
+        self._accept_cookies(page)
+        page.wait_for_timeout(pause_ms)
+        if page.url.startswith("chrome-error://"):
+            raise RuntimeError(f"Η σελίδα δεν άνοιξε: {url}")
+        return PageResult(url=url, final_url=page.url, html=page.content(), status=status)
+
+    @staticmethod
+    def _close(page):
+        try:
+            page.close()
+        except Exception:  # noqa: BLE001
+            pass
+
     def open(self, url: str, timeout_ms: int = 45000):
         """Ανοίγει τη σελίδα και επιστρέφει (page, PageResult). Ο καλών κλείνει τη σελίδα."""
         self._polite_wait(url)
         page = self._context.new_page()
         try:
             resp = page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+            return page, self._finish(page, url, resp.status if resp else None, time.time() + 4, 4000, 600)
         except Exception:
-            try:  # να μη μένουν ανοιχτές καρτέλες από σελίδες που δεν άνοιξαν
-                page.close()
-            except Exception:  # noqa: BLE001
-                pass
+            self._close(page)  # να μη μένουν ανοιχτές καρτέλες από σελίδες που δεν άνοιξαν
             raise
-        try:
-            page.wait_for_load_state("networkidle", timeout=4000)
-        except Exception:  # noqa: BLE001
-            pass
-        self._accept_cookies(page)
-        page.wait_for_timeout(600)
-        res = PageResult(url=url, final_url=page.url, html=page.content(),
-                         status=resp.status if resp else None)
-        return page, res
 
     def open_many(self, urls: list[str], timeout_ms: int = 45000, idle_ms: int = 2500) -> list:
         """Ανοίγει πολλές σελίδες ΤΑΥΤΟΧΡΟΝΑ (μία καρτέλα η καθεμία) και επιστρέφει για την καθεμία
         (page, PageResult) ή την εξαίρεση. Ο χρόνος χάνεται στην αναμονή των sites, οπότε 4 καρτέλες μαζί
-        τελειώνουν σχεδόν όσο γρήγορα και μία. Ο καλών κλείνει τις σελίδες."""
+        τελειώνουν σχεδόν όσο γρήγορα και μία. Ο καλών κλείνει τις σελίδες. Σε ορατό browser μία-μία: οι
+        καρτέλες στο παρασκήνιο «φρενάρονται» και δεν προλαβαίνουν να δείξουν τα αποτελέσματα."""
+        if not self.headless:
+            out = []
+            for u in urls:
+                try:
+                    out.append(self.open(u, timeout_ms))
+                except Exception as e:  # noqa: BLE001
+                    out.append(e)
+            return out
         started = []
         for url in urls:
             self._polite_wait(url)
@@ -260,8 +277,8 @@ class Browser:
             status: dict = {}
 
             def on_response(r, page=page, status=status):
-                try:
-                    if "code" not in status and r.request.is_navigation_request() and r.frame == page.main_frame:
+                try:  # η τελευταία απάντηση της κύριας σελίδας (μετά από ανακατευθύνσεις), όπως στο goto
+                    if r.request.is_navigation_request() and r.frame == page.main_frame:
                         status["code"] = r.status
                 except Exception:  # noqa: BLE001
                     pass
@@ -270,37 +287,30 @@ class Browser:
             try:
                 # Χωρίς αναμονή: η πλοήγηση ξεκινά και ο browser φορτώνει όλες τις καρτέλες μαζί
                 page.evaluate("u => { window.location.href = u; }", url)
-                started.append((page, url, None, status))
             except Exception as e:  # noqa: BLE001
-                started.append((page, url, e, None))
+                if "context was destroyed" not in str(e) and "navigat" not in str(e).lower():
+                    started.append((page, url, e, None))
+                    continue
+                # η πλοήγηση ξεκίνησε τόσο γρήγορα που «χάλασε» το ίδιο το evaluate: όλα καλά
+            started.append((page, url, None, status))
         out = []
         deadline = time.time() + timeout_ms / 1000
+
+        def left():
+            return max(1000, int((deadline - time.time()) * 1000))
+
         for page, url, error, status in started:
             if error is not None:
                 if page is not None:
-                    try:
-                        page.close()
-                    except Exception:  # noqa: BLE001
-                        pass
+                    self._close(page)
                 out.append(error)
                 continue
             try:
-                left = max(1000, int((deadline - time.time()) * 1000))
-                page.wait_for_url(lambda u: not u.startswith("about:"), timeout=left)
-                page.wait_for_load_state("domcontentloaded", timeout=left)
-                try:
-                    page.wait_for_load_state("networkidle", timeout=idle_ms)
-                except Exception:  # noqa: BLE001
-                    pass
-                self._accept_cookies(page)
-                page.wait_for_timeout(300)
-                out.append((page, PageResult(url=url, final_url=page.url, html=page.content(),
-                                             status=status.get("code"))))
+                page.wait_for_url(lambda u: not u.startswith("about:"), timeout=left())
+                page.wait_for_load_state("domcontentloaded", timeout=left())
+                out.append((page, self._finish(page, url, status.get("code"), deadline, idle_ms, 300)))
             except Exception as e:  # noqa: BLE001
-                try:
-                    page.close()
-                except Exception:  # noqa: BLE001
-                    pass
+                self._close(page)
                 out.append(e)
         return out
 
