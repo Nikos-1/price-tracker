@@ -187,8 +187,14 @@ async function pickedCategory(m, id) {
 // Π.χ. «Ηλεκτρικές συσκευές», «Ρούχα». Ένα προϊόν με γενική κατηγορία ψάχνεται μόνο σε καταστήματα αυτής της
 // κατηγορίας και σε όσα δεν έχουν δηλωμένη καμία (π.χ. BestPrice, Amazon).
 async function loadSectors() { state.sectors = await api("GET", "/api/sectors"); return state.sectors; }
-function sectorPicker(id, selected) {
-  return `<select id="${id}"><option value="">Όλα τα καταστήματα</option>` +
+// selected: id γενικής κατηγορίας, "all" (όλα τα καταστήματα) ή "" (όπως η κατηγορία του προϊόντος)
+function inheritLabel(catId) {
+  const cs = (state.sectors || []).find((x) => x.id === catSector(catId));
+  return `Όπως η κατηγορία (${cs ? cs.name : "όλα τα καταστήματα"})`;
+}
+function sectorPicker(id, selected, catId) {
+  return `<select id="${id}"><option value="" ${!selected ? "selected" : ""}>${esc(inheritLabel(catId))}</option>` +
+    `<option value="all" ${selected === "all" ? "selected" : ""}>Όλα τα καταστήματα</option>` +
     (state.sectors || []).map((x) => `<option value="${x.id}" ${x.id === selected ? "selected" : ""}>${esc(x.name)}</option>`).join("") +
     `<option value="__new">+ Νέα γενική κατηγορία…</option></select>
     <input id="${id}-new" placeholder="Όνομα νέας γενικής κατηγορίας" style="display:none;margin-top:6px">`;
@@ -196,11 +202,11 @@ function sectorPicker(id, selected) {
 function bindSectorPicker(m, id, catId) {
   const sel = $("#" + id, m), inp = $("#" + id + "-new", m);
   sel.onchange = () => { inp.style.display = sel.value === "__new" ? "" : "none"; if (sel.value === "__new") inp.focus(); };
-  // Αλλαγή κατηγορίας: προτείνεται η γενική κατηγορία που έχει ήδη αυτή η κατηγορία
+  // Αλλαγή κατηγορίας: η επιλογή «Όπως η κατηγορία» δείχνει τη γενική κατηγορία της νέας κατηγορίας·
+  // μια επιλογή που έκανες μόνος σου (συγκεκριμένη ή «Όλα τα καταστήματα») δεν αλλάζει
   const cat = catId && $("#" + catId, m);
   if (cat) cat.addEventListener("change", () => {
-    const c = state.categories.find((x) => String(x.id) === cat.value);
-    if (c && c.sector_id) { sel.value = c.sector_id; sel.onchange(); }
+    sel.querySelector('option[value=""]').textContent = inheritLabel(cat.value);
   });
 }
 async function pickedSector(m, id) {
@@ -280,7 +286,7 @@ async function editProduct(p) {
     <label>Όνομα</label><input id="ep-name" value="${esc(p.name)}">
     <div class="two"><div><label>Κατηγορία</label>${categoryPicker("ep-cat", p.category_id)}</div>
     <div><label>Τιμή-στόχος (€)</label><input id="ep-target" value="${p.target_price ?? ""}" placeholder="π.χ. 99,90"></div></div>
-    <label>Γενική κατηγορία (σε ποια καταστήματα να ψάχνεται)</label>${sectorPicker("ep-sec", p.sector_id || catSector(p.category_id))}${SECTOR_HINT}
+    <label>Γενική κατηγορία (σε ποια καταστήματα να ψάχνεται)</label>${sectorPicker("ep-sec", p.all_shops ? "all" : p.sector_id || "", p.category_id)}${SECTOR_HINT}
     <label>Σημειώσεις</label><textarea id="ep-notes" rows="3">${esc(p.notes || "")}</textarea>
     <div class="btns"><button data-close>Άκυρο</button><button class="primary" id="ep-save">Αποθήκευση</button></div>`,
     { onMount: (m, close) => {
@@ -483,7 +489,7 @@ async function addProduct() {
     <label>Όνομα (προαιρετικό – συμπληρώνεται αυτόματα)</label><input id="ap-name" placeholder="π.χ. Corsair RM850x">
     <div class="two"><div><label>Κατηγορία</label>${categoryPicker("ap-cat", typeof state.category === "string" && +state.category > 0 ? +state.category : null)}</div>
     <div><label>Τιμή-στόχος (€, προαιρετικό)</label><input id="ap-target" placeholder="π.χ. 99,90"></div></div>
-    <label>Γενική κατηγορία (π.χ. Ηλεκτρικές συσκευές, Ρούχα)</label>${sectorPicker("ap-sec", catSector(cat0))}${SECTOR_HINT}
+    <label>Γενική κατηγορία (π.χ. Ηλεκτρικές συσκευές, Ρούχα)</label>${sectorPicker("ap-sec", "", cat0)}${SECTOR_HINT}
     <label class="inline"><input type="checkbox" id="ap-search" checked> Αναζήτηση και στα άλλα καταστήματα</label>
     <div class="btns"><button data-close>Άκυρο</button><button class="primary" id="ap-save">Προσθήκη</button></div>`,
     { onMount: (m, close) => {
