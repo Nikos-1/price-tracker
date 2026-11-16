@@ -300,6 +300,10 @@ class Browser:
             return max(1000, int((deadline - time.time()) * 1000))
 
         for page, url, error, status in started:
+            if stop is not None and stop.is_set():  # Διακοπή: κλείνουν οι καρτέλες που περιμένουν ακόμα
+                if page is not None:
+                    self._close(page)
+                continue
             if error is not None:
                 if page is not None:
                     self._close(page)
