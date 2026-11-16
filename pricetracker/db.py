@@ -133,6 +133,7 @@ MIGRATIONS = {
 }
 
 DEFAULT_SETTINGS = {
+    "search_parallel": 4,             # πόσα καταστήματα ψάχνονται ταυτόχρονα
     "check_interval_hours": 6,
     "auto_update": True,
     "warranty_reminder_days": 30,

@@ -56,6 +56,13 @@ def _interleave_by_host(listings: list[dict]) -> list[dict]:
 
 
 DETECT_RETRY_S = 30 * 86400
+BROKEN_RETRY_S = 86400  # κατάστημα με «χαλασμένη» αναζήτηση: ξαναδοκιμάζεται μετά από μία μέρα
+
+
+def _broken_fresh(entry, shop) -> bool:
+    """Το κατάστημα σημειώθηκε πρόσφατα ότι η αναζήτησή του (με το ίδιο URL) ανοίγει την αρχική."""
+    entry = entry or {}
+    return entry.get("url") == shop.get("search_url") and time.time() - float(entry.get("at") or 0) < BROKEN_RETRY_S
 
 
 def _detect_tried(settings) -> dict[str, float]:
@@ -804,11 +811,26 @@ class Worker:
         στο «Υγεία». Κρατιέται και το URL: μόλις το διορθώσεις, η ειδοποίηση φεύγει μόνη της. True αν άλλαξε κάτι."""
         key = shop["key"]
         if broken:
-            if (cur.get(key) or {}).get("url") == shop["search_url"]:
+            if _broken_fresh(cur.get(key), shop):
                 return False
             cur[key] = {"name": shop["name"], "url": shop["search_url"], "at": time.time()}
             return True
         return cur.pop(key, None) is not None
+
+    @staticmethod
+    def _open_batch(br, urls: list[str], stop=None) -> list:
+        """Πολλές σελίδες μαζί όταν ο browser το υποστηρίζει, αλλιώς μία-μία. Για καθεμία (page, res) ή εξαίρεση."""
+        if hasattr(br, "open_many"):
+            return br.open_many(urls, stop=stop)
+        out = []
+        for u in urls:
+            if stop is not None and stop.is_set():
+                break
+            try:
+                out.append(br.open(u))
+            except Exception as e:  # noqa: BLE001
+                out.append(e)
+        return out
 
     def search_product(self, product_id: int, label: str | None = None) -> list[str]:
         """Αναζήτηση στα καταστήματα που δεν έχουν ακόμα το προϊόν. Επιστρέφει τα καταστήματα με νέες προτάσεις."""
@@ -828,48 +850,81 @@ class Worker:
         if not queries:
             return []
         query = queries[0]
-        broken_now = self.db.get_settings().get("search_broken") or {}
+        settings = self.db.get_settings()
+        broken_now = settings.get("search_broken") or {}
         if not isinstance(broken_now, dict):
             broken_now = {}
+        # Καταστήματα με URL αναζήτησης που ξέρουμε ότι ανοίγει την αρχική: δεν ψάχνονται μέχρι να το διορθώσεις
+        # (φαίνονται στο «Υγεία»). Μετά από μία μέρα ξαναδοκιμάζονται, μήπως ήταν κάτι προσωρινό.
+        skipped = [s for s in shops if _broken_fresh(broken_now.get(s["key"]), s)]
+        shops = [s for s in shops if not _broken_fresh(broken_now.get(s["key"]), s)]
+        if skipped:
+            self._log("Παραλείπονται (λάθος URL αναζήτησης): " + ", ".join(s["name"] for s in skipped))
         broken_changed = False
+        try:
+            v = settings.get("search_parallel")
+            parallel = max(1, min(8, int(4 if v is None or v == "" else v)))
+        except (TypeError, ValueError):
+            parallel = 4
         self.status.update(task=(f"{label}: " if label else "") + f"Αναζήτηση «{query}»", progress=0,
                            total=len(shops))
         new_shops: list[str] = []
-        self._log(f"Αναζήτηση «{query}» σε {len(shops)} καταστήματα")
+        self._log(f"Αναζήτηση «{query}» σε {len(shops)} καταστήματα ({parallel} ταυτόχρονα)")
         found = 0
+        # Κάθε κατάστημα: πρώτα «μάρκα + μοντέλο», μετά ο τίτλος, μετά το EAN· σταματά στην πρώτη που βρίσκει κάτι.
+        # Τα καταστήματα ψάχνονται `parallel` μαζί: όσο περιμένουμε το ένα site, φορτώνουν και τα άλλα.
+        state = {s["id"]: {"q": 0, "homes": 0} for s in shops}
+        pending = list(shops)
+        done = 0
         with self._browser() as br:
-            for i, s in enumerate(shops, 1):
-                if self._stop.is_set():
-                    break
-                self.status["progress"] = i
-                try:
+            while pending and not self._stop.is_set():
+                batch, pending = pending[:parallel], pending[parallel:]
+                urls = [search_url(s["search_url"], queries[state[s["id"]]["q"]]) for s in batch]
+                results = self._open_batch(br, urls, self._stop)
+                for s, r in zip(batch, results):
+                    st = state[s["id"]]
+                    st["q"] += 1
                     cands = []
-                    homes = 0
-                    # Πρώτα «μάρκα + μοντέλο», μετά ο τίτλος, μετά το EAN: σταματά στην πρώτη που βρίσκει κάτι
-                    for q in queries:
-                        page, res = br.open(search_url(s["search_url"], q))
+                    try:
+                        if isinstance(r, Exception):
+                            raise r
+                        page, res = r
                         page.close()
                         cands = find_candidates(res.html, res.final_url, title, product.get("ean"),
                                                 product.get("mpn"), product.get("brand"))
                         if not cands and returns_home(res.html, res.final_url, f"https://{s['domain']}/"):
-                            homes += 1  # δύο φορές η αρχική: το URL αναζήτησης είναι λάθος, άλλη λέξη δεν θα βοηθήσει
-                            if homes >= 2:
-                                break
-                        if cands or self._stop.is_set():
-                            break
-                    if cands or not homes:  # η αναζήτηση δουλεύει (έστω και χωρίς αποτελέσματα)
-                        broken_changed |= self._mark_search_broken(broken_now, s, False)
-                    elif homes >= 2 or homes == len(queries):
-                        if self._mark_search_broken(broken_now, s, True):
-                            broken_changed = True
-                            self._log(f"{s['name']}: η αναζήτηση ανοίγει την αρχική σελίδα – έλεγξε το URL αναζήτησης")
-                    for c in cands:
-                        self.db.add_listing(product_id, c["url"], status="candidate", title=c["title"])
-                        found += 1
-                    if cands:
-                        new_shops.append(s["name"])
-                except Exception as e:  # noqa: BLE001
-                    self._log(f"Αναζήτηση στο {s['name']} απέτυχε: {str(e).splitlines()[0][:200]}")
+                            st["homes"] += 1  # δύο φορές η αρχική: το URL αναζήτησης είναι λάθος
+                    except Exception as e:  # noqa: BLE001
+                        self._log(f"Αναζήτηση στο {s['name']} απέτυχε: {str(e).splitlines()[0][:200]}")
+                        st["q"] = len(queries)  # όπως πριν: μια αποτυχία σταματά το κατάστημα
+                        st["failed"] = True
+                    more = not cands and st["q"] < len(queries) and st["homes"] < 2 and not st.get("failed")
+                    if more:
+                        pending.append(s)  # επόμενη αναζήτηση για αυτό το κατάστημα, σε επόμενο γύρο
+                        continue
+                    done += 1
+                    self.status["progress"] = done
+                    if st.get("failed"):
+                        continue
+                    try:
+                        if cands or not st["homes"]:  # η αναζήτηση δουλεύει (έστω και χωρίς αποτελέσματα)
+                            broken_changed |= self._mark_search_broken(broken_now, s, False)
+                        elif st["homes"] >= 2 or st["homes"] == st["q"]:
+                            if self._mark_search_broken(broken_now, s, True):
+                                broken_changed = True
+                                self._log(f"{s['name']}: η αναζήτηση ανοίγει την αρχική σελίδα – έλεγξε το URL αναζήτησης")
+                        for c in cands:
+                            self.db.add_listing(product_id, c["url"], status="candidate", title=c["title"])
+                            found += 1
+                        if cands:
+                            new_shops.append(s["name"])
+                    except Exception as e:  # noqa: BLE001 - ένα κατάστημα δεν σταματά την αναζήτηση στα υπόλοιπα
+                        self._log(f"Αναζήτηση στο {s['name']} απέτυχε: {str(e).splitlines()[0][:200]}")
+        # Σταμάτησες στη μέση: όσα καταστήματα άνοιξαν κανονική σελίδα αποτελεσμάτων δεν είναι «χαλασμένα»
+        for s in pending:
+            st = state[s["id"]]
+            if st["q"] and not st["homes"] and not st.get("failed"):
+                broken_changed |= self._mark_search_broken(broken_now, s, False)
         if broken_changed:
             self.db.set_settings({"search_broken": broken_now})
         self._log(f"Βρέθηκαν {found} πιθανές αντιστοιχίες – έλεγξέ τις στο προϊόν")
