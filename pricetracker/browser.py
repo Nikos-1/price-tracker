@@ -231,8 +231,6 @@ class Browser:
             pass
         self._accept_cookies(page)
         page.wait_for_timeout(pause_ms)
-        if page.url.startswith("chrome-error://"):
-            raise RuntimeError(f"Η σελίδα δεν άνοιξε: {url}")
         return PageResult(url=url, final_url=page.url, html=page.content(), status=status)
 
     @staticmethod
@@ -253,7 +251,7 @@ class Browser:
             self._close(page)  # να μη μένουν ανοιχτές καρτέλες από σελίδες που δεν άνοιξαν
             raise
 
-    def open_many(self, urls: list[str], timeout_ms: int = 45000, idle_ms: int = 2500) -> list:
+    def open_many(self, urls: list[str], timeout_ms: int = 45000, idle_ms: int = 2500, stop=None) -> list:
         """Ανοίγει πολλές σελίδες ΤΑΥΤΟΧΡΟΝΑ (μία καρτέλα η καθεμία) και επιστρέφει για την καθεμία
         (page, PageResult) ή την εξαίρεση. Ο χρόνος χάνεται στην αναμονή των sites, οπότε 4 καρτέλες μαζί
         τελειώνουν σχεδόν όσο γρήγορα και μία. Ο καλών κλείνει τις σελίδες. Σε ορατό browser μία-μία: οι
@@ -261,6 +259,8 @@ class Browser:
         if not self.headless:
             out = []
             for u in urls:
+                if stop is not None and stop.is_set():
+                    break
                 try:
                     out.append(self.open(u, timeout_ms))
                 except Exception as e:  # noqa: BLE001
@@ -278,7 +278,7 @@ class Browser:
 
             def on_response(r, page=page, status=status):
                 try:  # η τελευταία απάντηση της κύριας σελίδας (μετά από ανακατευθύνσεις), όπως στο goto
-                    if r.request.is_navigation_request() and r.frame == page.main_frame:
+                    if not status.get("frozen") and r.request.is_navigation_request() and r.frame == page.main_frame:
                         status["code"] = r.status
                 except Exception:  # noqa: BLE001
                     pass
@@ -288,7 +288,7 @@ class Browser:
                 # Χωρίς αναμονή: η πλοήγηση ξεκινά και ο browser φορτώνει όλες τις καρτέλες μαζί
                 page.evaluate("u => { window.location.href = u; }", url)
             except Exception as e:  # noqa: BLE001
-                if "context was destroyed" not in str(e) and "navigat" not in str(e).lower():
+                if "context was destroyed" not in str(e):
                     started.append((page, url, e, None))
                     continue
                 # η πλοήγηση ξεκίνησε τόσο γρήγορα που «χάλασε» το ίδιο το evaluate: όλα καλά
@@ -306,8 +306,11 @@ class Browser:
                 out.append(error)
                 continue
             try:
-                page.wait_for_url(lambda u: not u.startswith("about:"), timeout=left())
+                page.wait_for_url(lambda u: not u.startswith("about:"), timeout=left(), wait_until="commit")
                 page.wait_for_load_state("domcontentloaded", timeout=left())
+                status["frozen"] = True  # ό,τι φορτώσει μετά (π.χ. μετά τα cookies) δεν αλλάζει την κατάσταση
+                if page.url.startswith("chrome-error://"):  # δεν άνοιξε (π.χ. δεν απαντά ο server), όπως το goto
+                    raise RuntimeError(f"Η σελίδα δεν άνοιξε: {url}")
                 out.append((page, self._finish(page, url, status.get("code"), deadline, idle_ms, 300)))
             except Exception as e:  # noqa: BLE001
                 self._close(page)

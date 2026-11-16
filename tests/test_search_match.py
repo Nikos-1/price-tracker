@@ -203,7 +203,7 @@ def test_search_runs_shops_in_parallel_batches(tmp_path, monkeypatch):
             pass
 
     class Br:
-        def open_many(self, urls):
+        def open_many(self, urls, stop=None):
             batches.append(urls)
             return [(Page(), PageResult(u, u, hit if hit_host in u else empty, 200)) for u in urls]
 

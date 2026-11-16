@@ -56,7 +56,13 @@ def _interleave_by_host(listings: list[dict]) -> list[dict]:
 
 
 DETECT_RETRY_S = 30 * 86400
-BROKEN_RETRY_S = 7 * 86400  # κατάστημα με «χαλασμένη» αναζήτηση: ξαναδοκιμάζεται μετά από μια εβδομάδα
+BROKEN_RETRY_S = 86400  # κατάστημα με «χαλασμένη» αναζήτηση: ξαναδοκιμάζεται μετά από μία μέρα
+
+
+def _broken_fresh(entry, shop) -> bool:
+    """Το κατάστημα σημειώθηκε πρόσφατα ότι η αναζήτησή του (με το ίδιο URL) ανοίγει την αρχική."""
+    entry = entry or {}
+    return entry.get("url") == shop.get("search_url") and time.time() - float(entry.get("at") or 0) < BROKEN_RETRY_S
 
 
 def _detect_tried(settings) -> dict[str, float]:
@@ -788,20 +794,21 @@ class Worker:
         στο «Υγεία». Κρατιέται και το URL: μόλις το διορθώσεις, η ειδοποίηση φεύγει μόνη της. True αν άλλαξε κάτι."""
         key = shop["key"]
         if broken:
-            old = cur.get(key) or {}
-            if old.get("url") == shop["search_url"] and time.time() - float(old.get("at") or 0) < BROKEN_RETRY_S:
+            if _broken_fresh(cur.get(key), shop):
                 return False
             cur[key] = {"name": shop["name"], "url": shop["search_url"], "at": time.time()}
             return True
         return cur.pop(key, None) is not None
 
     @staticmethod
-    def _open_batch(br, urls: list[str]) -> list:
+    def _open_batch(br, urls: list[str], stop=None) -> list:
         """Πολλές σελίδες μαζί όταν ο browser το υποστηρίζει, αλλιώς μία-μία. Για καθεμία (page, res) ή εξαίρεση."""
         if hasattr(br, "open_many"):
-            return br.open_many(urls)
+            return br.open_many(urls, stop=stop)
         out = []
         for u in urls:
+            if stop is not None and stop.is_set():
+                break
             try:
                 out.append(br.open(u))
             except Exception as e:  # noqa: BLE001
@@ -831,12 +838,9 @@ class Worker:
         if not isinstance(broken_now, dict):
             broken_now = {}
         # Καταστήματα με URL αναζήτησης που ξέρουμε ότι ανοίγει την αρχική: δεν ψάχνονται μέχρι να το διορθώσεις
-        # (φαίνονται στο «Υγεία»). Μετά από μια εβδομάδα ξαναδοκιμάζονται, μήπως ήταν κάτι προσωρινό.
-        def known_broken(sh):
-            b = broken_now.get(sh["key"]) or {}
-            return b.get("url") == sh["search_url"] and time.time() - float(b.get("at") or 0) < BROKEN_RETRY_S
-        skipped = [s for s in shops if known_broken(s)]
-        shops = [s for s in shops if s not in skipped]
+        # (φαίνονται στο «Υγεία»). Μετά από μία μέρα ξαναδοκιμάζονται, μήπως ήταν κάτι προσωρινό.
+        skipped = [s for s in shops if _broken_fresh(broken_now.get(s["key"]), s)]
+        shops = [s for s in shops if not _broken_fresh(broken_now.get(s["key"]), s)]
         if skipped:
             self._log("Παραλείπονται (λάθος URL αναζήτησης): " + ", ".join(s["name"] for s in skipped))
         broken_changed = False
@@ -859,7 +863,7 @@ class Worker:
             while pending and not self._stop.is_set():
                 batch, pending = pending[:parallel], pending[parallel:]
                 urls = [search_url(s["search_url"], queries[state[s["id"]]["q"]]) for s in batch]
-                results = self._open_batch(br, urls)
+                results = self._open_batch(br, urls, self._stop)
                 for s, r in zip(batch, results):
                     st = state[s["id"]]
                     st["q"] += 1
@@ -899,6 +903,11 @@ class Worker:
                             new_shops.append(s["name"])
                     except Exception as e:  # noqa: BLE001 - ένα κατάστημα δεν σταματά την αναζήτηση στα υπόλοιπα
                         self._log(f"Αναζήτηση στο {s['name']} απέτυχε: {str(e).splitlines()[0][:200]}")
+        # Σταμάτησες στη μέση: όσα καταστήματα άνοιξαν κανονική σελίδα αποτελεσμάτων δεν είναι «χαλασμένα»
+        for s in pending:
+            st = state[s["id"]]
+            if st["q"] and not st["homes"] and not st.get("failed"):
+                broken_changed |= self._mark_search_broken(broken_now, s, False)
         if broken_changed:
             self.db.set_settings({"search_broken": broken_now})
         self._log(f"Βρέθηκαν {found} πιθανές αντιστοιχίες – έλεγξέ τις στο προϊόν")
