@@ -221,3 +221,48 @@ def test_import_does_not_restore_bad_you_gr_url():
     assert fixed_search_url("you.gr", "") == good
     assert fixed_search_url("you.gr", "https://www.you.gr/x?q={q}") == "https://www.you.gr/x?q={q}"
     assert fixed_search_url("plaisio.gr", "") == ""
+
+
+def test_detect_job_passes_replace_through_queue(tmp_path, monkeypatch):
+    db = Database(tmp_path / "db.sqlite")
+    w = Worker(db, tmp_path)
+    got = []
+    monkeypatch.setattr(w, "detect_search", lambda sid, replace=False: got.append((sid, replace)))
+    w.enqueue("detect_search", shop_id=7, replace=True)
+    w.q.put(None)
+    w._loop()
+    assert got == [(7, True)]
+
+
+def test_found_url_without_replace_keeps_existing(tmp_path, monkeypatch):
+    import pricetracker.worker as wm
+
+    db = Database(tmp_path / "db.sqlite")
+    w = Worker(db, tmp_path)
+    sid = db.create_shop("Shop", "GR", "shop-x.gr", "https://www.shop-x.gr/s?q={q}", 1)
+
+    class Res:
+        html, status, final_url = "<html></html>", 200, "https://www.shop-x.gr/"
+
+    class Br:
+        def open(self, url, **k):
+            class P:
+                def close(self):
+                    pass
+            return P(), Res()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(w, "_browser", lambda: Br())
+    monkeypatch.setattr(wm, "search_url_candidates", lambda h, u: ["https://www.shop-x.gr/find?k={q}"])
+    monkeypatch.setattr(wm, "looks_like_search_results", lambda *a: True)
+    w.detect_search(sid, word="x")
+    assert db.get_shop(sid)["search_url"] == "https://www.shop-x.gr/s?q={q}"
+    assert w.detect[sid]["state"] == "kept"
+    w.detect_search(sid, word="x", replace=True)
+    assert db.get_shop(sid)["search_url"] == "https://www.shop-x.gr/find?k={q}"
+    assert w.detect[sid]["state"] == "found"

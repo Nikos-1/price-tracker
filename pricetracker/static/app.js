@@ -926,9 +926,9 @@ async function renderSettings() {
           const tick = async () => {
             if (!document.body.contains(tr)) return;
             const st = await api("GET", `/api/shops/${id}/detect`).catch(() => null);
-            if (st && ["found", "guessed", "notfound"].includes(st.state)) {
+            if (st && ["found", "guessed", "notfound", "kept"].includes(st.state)) {
               if (st.search_url) { $("[data-f=search_url]", tr).value = st.search_url; $("[data-f=search_enabled]", tr).checked = !!st.search_enabled; }
-              msg.textContent = (st.state === "found" ? "✔ " : st.state === "guessed" ? "⚠ " : "✕ ") + st.message;
+              msg.textContent = (st.state === "found" ? "✔ " : st.state === "guessed" ? "⚠ " : st.state === "kept" ? "ℹ " : "✕ ") + st.message;
               if (st.state === "notfound" && btn) btn.style.display = "";
               return;
             }

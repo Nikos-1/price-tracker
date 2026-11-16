@@ -766,10 +766,11 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None, exports_dir
             country = x.get("country") if x.get("country") in COUNTRIES else guess_country(domain)
             if country:
                 region = region_of_country(country)
-            url = fixed_search_url(domain, str(x.get("search_url") or "").strip())  # όχι πίσω σε γνωστό λάθος
+            raw = str(x.get("search_url") or "").strip()
+            url = fixed_search_url(domain, raw)  # όχι πίσω σε γνωστό λάθος
             if not domain or "." not in domain or not name or (url and "{q}" not in url):
                 continue
-            enabled = 1 if (x.get("search_enabled") and url) else 0
+            enabled = 1 if url and (x.get("search_enabled") or url != raw) else 0
             have = db.shop_by_domain(domain)
             if have:
                 db.update_shop(have["id"], name=name, region=region, search_url=url, search_enabled=enabled,

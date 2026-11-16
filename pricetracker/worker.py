@@ -131,14 +131,16 @@ class Worker:
         keys = {s["key"] for s in DEFAULT_SHOPS}
         for sh in self.db.list_shops():
             # Μια αποτυχία δεν μένει για πάντα: νέα προσπάθεια μετά από 30 μέρες (το κατάστημα μπορεί να άλλαξε)
-            if sh["key"] in keys and not sh.get("search_url"):
-                known = known_search_url(sh["key"], sh.get("domain"))
-                if known:  # γνωστό σωστό URL: μπαίνει κατευθείαν, χωρίς εύρεση
-                    self.db.update_shop(sh["id"], search_url=known, search_enabled=1)
-                    continue
-            if sh["key"] in keys and not sh.get("search_url") and time.time() - tried.get(sh["key"], 0) > DETECT_RETRY_S:
-                self.detect[sh["id"]] = {"state": "queued", "message": "Σε αναμονή…"}
-                self.enqueue("detect_search", shop_id=sh["id"])
+            if sh["key"] not in keys or sh.get("search_url") or time.time() - tried.get(sh["key"], 0) <= DETECT_RETRY_S:
+                continue
+            known = known_search_url(sh["key"], sh.get("domain"))
+            if known:  # γνωστό σωστό URL: μπαίνει κατευθείαν, χωρίς εύρεση (κι αυτό μία φορά στις 30 μέρες)
+                self.db.update_shop(sh["id"], search_url=known, search_enabled=1)
+                tried[sh["key"]] = time.time()
+                self.db.set_settings({"detect_tried": tried})
+                continue
+            self.detect[sh["id"]] = {"state": "queued", "message": "Σε αναμονή…"}
+            self.enqueue("detect_search", shop_id=sh["id"])
 
     # ------------------------------------------------------------ loops
     def _scheduler(self):
@@ -230,7 +232,7 @@ class Worker:
                 elif kind == "research_all":
                     self.research_all()
                 elif kind == "detect_search":
-                    self.detect_search(kw["shop_id"])
+                    self.detect_search(kw["shop_id"], replace=kw.get("replace", False))
                 self.status["last_error"] = None
             except Exception as e:  # noqa: BLE001
                 log.exception("job failed")
@@ -745,6 +747,10 @@ class Worker:
         # μόνο αν δεν υπάρχει τίποτα. Μια αποτυχία δεν σβήνει ποτέ το URL που υπάρχει.
         if url and (not cur or (found and replace)):
             self.db.update_shop(shop_id, search_url=url, search_enabled=1)
+        elif url and url != cur:  # δεν άλλαξε: το κατάστημα έχει ήδη URL, που μένει όπως είναι
+            st.update(state="kept", url=cur, message="Βρέθηκε άλλο URL, αλλά κρατήθηκε το υπάρχον.")
+            self._log(f"{shop['name']}: URL αναζήτησης: κρατήθηκε το υπάρχον ({url} δεν μπήκε)")
+            return
         if found:
             st.update(state="found", url=url, message="Βρέθηκε και δοκιμάστηκε")
         elif guess:
