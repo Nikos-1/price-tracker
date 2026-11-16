@@ -105,6 +105,23 @@ SEARCH_URL_FIXES = {
     "you_gr": ("https://www.you.gr/special-pages/searchq?query={q}", ("?s={q}",)),
 }
 
+
+def fixed_search_url(domain: str | None, url: str) -> str:
+    """Διορθώνει ένα κενό ή γνωστό λάθος URL αναζήτησης (π.χ. από παλιό αρχείο ρυθμίσεων) με το σωστό."""
+    for s in DEFAULT_SHOPS:
+        fix = SEARCH_URL_FIXES.get(s["key"])
+        if fix and domain and s["domain"] == domain and (not url or any(b in url for b in fix[1])):
+            return fix[0]
+    return url
+
+
+def known_search_url(key: str | None, domain: str | None) -> str:
+    """Το γνωστό, σωστό URL αναζήτησης ενός προεπιλεγμένου καταστήματος (με το κλειδί ή το domain του), ή ""."""
+    for s in DEFAULT_SHOPS:
+        if s["search_url"] and (s["key"] == key or (domain and s["domain"] == domain)):
+            return s["search_url"]
+    return ""
+
 DEFAULT_SHOPS = [
     # --- Ελλάδα ---
     _shop("bestprice", "BestPrice", "GR", "bestprice.gr", "https://www.bestprice.gr/search?q={q}"),

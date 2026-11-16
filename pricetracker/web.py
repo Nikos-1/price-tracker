@@ -17,7 +17,7 @@ from . import __version__
 from .db import DEFAULT_SETTINGS
 from .export import export_settings_xlsx, export_xlsx
 from .extract import normalize_currency
-from .shops import COUNTRIES, CURRENCY_CHOICES, REGION_LABELS, country_label, guess_country, region_of_country
+from .shops import COUNTRIES, CURRENCY_CHOICES, REGION_LABELS, country_label, fixed_search_url, guess_country, region_of_country
 
 STATIC = Path(__file__).parent / "static"
 RECEIPT_TYPES = {".pdf", ".jpg", ".jpeg", ".png", ".webp", ".heic", ".gif", ".bmp", ".tif", ".tiff"}
@@ -590,9 +590,9 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None, exports_dir
             abort(404)
         if not hasattr(worker, "detect"):
             return err("Δεν είναι διαθέσιμο")
-        db.update_shop(sid, search_url="", search_enabled=0)
+        # Το τωρινό URL μένει μέχρι να βρεθεί καλύτερο: μια αποτυχημένη εύρεση δεν αφήνει το κατάστημα χωρίς αναζήτηση
         worker.detect[sid] = {"state": "queued", "message": "Σε αναμονή…"}
-        worker.enqueue("detect_search", shop_id=sid)
+        worker.enqueue("detect_search", shop_id=sid, replace=True)
         return jsonify({"ok": True})
 
     @app.get("/api/shops/<int:sid>/detect")
@@ -774,10 +774,11 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None, exports_dir
             country = x.get("country") if x.get("country") in COUNTRIES else guess_country(domain)
             if country:
                 region = region_of_country(country)
-            url = str(x.get("search_url") or "").strip()
+            raw = str(x.get("search_url") or "").strip()
+            url = fixed_search_url(domain, raw)  # όχι πίσω σε γνωστό λάθος
             if not domain or "." not in domain or not name or (url and "{q}" not in url):
                 continue
-            enabled = 1 if (x.get("search_enabled") and url) else 0
+            enabled = 1 if url and (x.get("search_enabled") or url != raw) else 0
             have = db.shop_by_domain(domain)
             if have:
                 db.update_shop(have["id"], name=name, region=region, search_url=url, search_enabled=enabled,

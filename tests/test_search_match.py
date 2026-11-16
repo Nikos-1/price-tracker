@@ -186,6 +186,88 @@ def test_slug_fallback_rejects_brand_and_category_pages():
     assert _drop_search_params("https://x.gr/p-a-b?id=1&query=foo&q=2") == "https://x.gr/p-a-b?id=1"
 
 
+def test_failed_detection_keeps_search_url(tmp_path, monkeypatch):
+    db = Database(tmp_path / "db.sqlite")
+    w = Worker(db, tmp_path)
+    sid = next(s["id"] for s in db.list_shops() if s["key"] == "you_gr")
+    good = db.get_shop(sid)["search_url"]
+
+    class Br:
+        def open(self, url, **k):
+            raise RuntimeError("offline")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(w, "_browser", lambda: Br())
+    w.detect_search(sid, replace=True)
+    assert db.get_shop(sid)["search_url"] == good  # η αποτυχία δεν σβήνει το URL
+    # Κενό URL σε προεπιλεγμένο κατάστημα με γνωστό URL: μπαίνει κατευθείαν, χωρίς εύρεση
+    db.update_shop(sid, search_url="", search_enabled=0)
+    queued = []
+    monkeypatch.setattr(w, "enqueue", lambda *a, **k: queued.append(k.get("shop_id")))
+    w.detect_new_default_shops()
+    assert db.get_shop(sid)["search_url"] == good and sid not in queued
+
+
+def test_import_does_not_restore_bad_you_gr_url():
+    from pricetracker.shops import fixed_search_url
+
+    good = "https://www.you.gr/special-pages/searchq?query={q}"
+    assert fixed_search_url("you.gr", "https://www.you.gr/?s={q}&post_type=product") == good
+    assert fixed_search_url("you.gr", "") == good
+    assert fixed_search_url("you.gr", "https://www.you.gr/x?q={q}") == "https://www.you.gr/x?q={q}"
+    assert fixed_search_url("plaisio.gr", "") == ""
+
+
+def test_detect_job_passes_replace_through_queue(tmp_path, monkeypatch):
+    db = Database(tmp_path / "db.sqlite")
+    w = Worker(db, tmp_path)
+    got = []
+    monkeypatch.setattr(w, "detect_search", lambda sid, replace=False: got.append((sid, replace)))
+    w.enqueue("detect_search", shop_id=7, replace=True)
+    w.q.put(None)
+    w._loop()
+    assert got == [(7, True)]
+
+
+def test_found_url_without_replace_keeps_existing(tmp_path, monkeypatch):
+    import pricetracker.worker as wm
+
+    db = Database(tmp_path / "db.sqlite")
+    w = Worker(db, tmp_path)
+    sid = db.create_shop("Shop", "GR", "shop-x.gr", "https://www.shop-x.gr/s?q={q}", 1)
+
+    class Res:
+        html, status, final_url = "<html></html>", 200, "https://www.shop-x.gr/"
+
+    class Br:
+        def open(self, url, **k):
+            class P:
+                def close(self):
+                    pass
+            return P(), Res()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(w, "_browser", lambda: Br())
+    monkeypatch.setattr(wm, "search_url_candidates", lambda h, u: ["https://www.shop-x.gr/find?k={q}"])
+    monkeypatch.setattr(wm, "looks_like_search_results", lambda *a: True)
+    w.detect_search(sid, word="x")
+    assert db.get_shop(sid)["search_url"] == "https://www.shop-x.gr/s?q={q}"
+    assert w.detect[sid]["state"] == "kept"
+    w.detect_search(sid, word="x", replace=True)
+    assert db.get_shop(sid)["search_url"] == "https://www.shop-x.gr/find?k={q}"
+    assert w.detect[sid]["state"] == "found"
+
+
 def test_search_runs_shops_in_parallel_batches(tmp_path, monkeypatch):
     db = Database(tmp_path / "db.sqlite")
     w = Worker(db, tmp_path)

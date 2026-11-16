@@ -15,7 +15,7 @@ from .browser import Browser
 from .extract import extract
 from .search import (build_queries, find_candidates, looks_like_search_results, probe_words, returns_home, search_url,
                      search_url_candidates)
-from .shops import DEFAULT_SHOPS, REGION_LABELS, country_label, currency_of_country, host_of
+from .shops import DEFAULT_SHOPS, REGION_LABELS, known_search_url, country_label, currency_of_country, host_of
 
 log = logging.getLogger(__name__)
 
@@ -138,9 +138,16 @@ class Worker:
         keys = {s["key"] for s in DEFAULT_SHOPS}
         for sh in self.db.list_shops():
             # Μια αποτυχία δεν μένει για πάντα: νέα προσπάθεια μετά από 30 μέρες (το κατάστημα μπορεί να άλλαξε)
-            if sh["key"] in keys and not sh.get("search_url") and time.time() - tried.get(sh["key"], 0) > DETECT_RETRY_S:
-                self.detect[sh["id"]] = {"state": "queued", "message": "Σε αναμονή…"}
-                self.enqueue("detect_search", shop_id=sh["id"])
+            if sh["key"] not in keys or sh.get("search_url") or time.time() - tried.get(sh["key"], 0) <= DETECT_RETRY_S:
+                continue
+            known = known_search_url(sh["key"], sh.get("domain"))
+            if known:  # γνωστό σωστό URL: μπαίνει κατευθείαν, χωρίς εύρεση (κι αυτό μία φορά στις 30 μέρες)
+                self.db.update_shop(sh["id"], search_url=known, search_enabled=1)
+                tried[sh["key"]] = time.time()
+                self.db.set_settings({"detect_tried": tried})
+                continue
+            self.detect[sh["id"]] = {"state": "queued", "message": "Σε αναμονή…"}
+            self.enqueue("detect_search", shop_id=sh["id"])
 
     # ------------------------------------------------------------ loops
     def _scheduler(self):
@@ -232,7 +239,7 @@ class Worker:
                 elif kind == "research_all":
                     self.research_all()
                 elif kind == "detect_search":
-                    self.detect_search(kw["shop_id"])
+                    self.detect_search(kw["shop_id"], replace=kw.get("replace", False))
                 self.status["last_error"] = None
             except Exception as e:  # noqa: BLE001
                 log.exception("job failed")
@@ -687,7 +694,7 @@ class Worker:
         if search:
             self.search_product(product_id)
 
-    def detect_search(self, shop_id: int, word: str | None = None):
+    def detect_search(self, shop_id: int, word: str | None = None, replace: bool = False):
         """Βρίσκει μόνο του το URL αναζήτησης ενός καταστήματος από την αρχική του σελίδα."""
         shop = self.db.get_shop(shop_id)
         if not shop:
@@ -710,6 +717,9 @@ class Worker:
                 if home is None:
                     raise RuntimeError("Δεν άνοιξε η αρχική σελίδα του καταστήματος")
                 cands = search_url_candidates(home.html, home.final_url)[:16]
+                known = known_search_url(shop.get("key"), shop.get("domain"))
+                if known:  # το γνωστό σωστό URL του καταστήματος δοκιμάζεται πρώτο
+                    cands = [known] + [c for c in cands if c != known]
                 structured = [c for c in cands if not any(c.endswith(p) for p in _common_paths())]
                 guess = structured[0] if structured else None
                 words = [word] if word else (probe_words(home.html) + ["samsung"])[:2]
@@ -739,8 +749,15 @@ class Worker:
             tried[sh["key"]] = time.time()
             self.db.set_settings({"detect_tried": tried})
         url = found or guess
-        if url and not (self.db.get_shop(shop_id) or {}).get("search_url"):
+        cur = (self.db.get_shop(shop_id) or {}).get("search_url")
+        # Επιβεβαιωμένο URL: μπαίνει (και στη θέση του παλιού, αν ζήτησες νέα εύρεση). Μια απλή εικασία μπαίνει
+        # μόνο αν δεν υπάρχει τίποτα. Μια αποτυχία δεν σβήνει ποτέ το URL που υπάρχει.
+        if url and (not cur or (found and replace)):
             self.db.update_shop(shop_id, search_url=url, search_enabled=1)
+        elif url and url != cur:  # δεν άλλαξε: το κατάστημα έχει ήδη URL, που μένει όπως είναι
+            st.update(state="kept", url=cur, message="Βρέθηκε άλλο URL, αλλά κρατήθηκε το υπάρχον.")
+            self._log(f"{shop['name']}: URL αναζήτησης: κρατήθηκε το υπάρχον ({url} δεν μπήκε)")
+            return
         if found:
             st.update(state="found", url=url, message="Βρέθηκε και δοκιμάστηκε")
         elif guess:
