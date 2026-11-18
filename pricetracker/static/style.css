@@ -157,3 +157,8 @@ table.offers td, table.offers th { padding: 4px 8px; }
 table.offers tr.unavail td { opacity: 0.55; }
 .chg-down { color: #15803d; }
 .chg-up { color: #b91c1c; }
+
+/* Πεδίο ημερομηνίας ΗΗ/ΜΜ/ΕΕΕΕ: κείμενο + κουμπί ημερολογίου· το κρυφό date input δίνει μόνο το ημερολόγιο */
+.date-field { position: relative; display: flex; gap: 6px; align-items: center; }
+.date-field [data-date] { flex: 1; min-width: 0; }
+.date-field [data-native-date] { position: absolute; right: 0; bottom: 0; width: 1px; height: 1px; opacity: 0; pointer-events: none; border: 0; padding: 0; }
