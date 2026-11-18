@@ -8,6 +8,31 @@ const eur = (v, cur) => (v == null ? "–" : v.toLocaleString("el-GR", { minimum
 const CURRENCIES = ["EUR", "USD", "GBP", "CHF", "PLN", "CZK", "SEK", "DKK", "NOK", "HUF", "RON", "CAD", "AUD", "JPY", "CNY", "TRY"];
 const money = (v, cur, v_eur) => (v == null ? "–" : !cur || cur === "EUR" || v_eur == null ? eur(v, cur)
   : `${eur(v, cur)} <span class="conv" title="Με την ισοτιμία της Ευρωπαϊκής Κεντρικής Τράπεζας">/ ≈${eur(v_eur)}</span>`);
+// Ημερομηνία χωρίς ώρα πάντα ως ΗΗ/ΜΜ/ΕΕΕΕ (π.χ. 05/03/2026), από «2026-03-05» ή «2026-03-05 10:00»
+const dmy = (s) => { const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(s || "")); return m ? `${m[3]}/${m[2]}/${m[1]}` : (s ? esc(String(s)) : "–"); };
+const dmyOf = (d) => `${String(d.getDate()).padStart(2, "0")}/${String(d.getMonth() + 1).padStart(2, "0")}/${d.getFullYear()}`;
+// Πεδίο ημερομηνίας που δείχνει πάντα ΗΗ/ΜΜ/ΕΕΕΕ, όποια γλώσσα κι αν έχουν τα Windows (το <input type="date"
+// ακολουθεί τη μορφή του συστήματος). Το 📅 ανοίγει το ημερολόγιο· γράφεται και με το χέρι, π.χ. 5/3/2026.
+const dateField = (id, iso = "") => `<span class="date-field"><input id="${id}" data-date value="${iso ? dmy(iso) : ""}" placeholder="ΗΗ/ΜΜ/ΕΕΕΕ" inputmode="numeric" autocomplete="off"><button type="button" class="small" data-pick-date title="Ημερολόγιο">📅</button><input type="date" tabindex="-1" aria-hidden="true" data-native-date></span>`;
+function wireDateFields(root) {
+  root.querySelectorAll(".date-field").forEach((w) => {
+    const txt = $("[data-date]", w), nat = $("[data-native-date]", w);
+    $("[data-pick-date]", w).onclick = () => {
+      try { nat.value = dateValue(txt, false) || localDate(); } catch { nat.value = localDate(); }
+      try { nat.showPicker(); } catch { nat.click(); }
+    };
+    nat.onchange = () => { if (nat.value) txt.value = dmy(nat.value); };
+  });
+}
+// ΗΗ/ΜΜ/ΕΕΕΕ (δέχεται και / . -) σε ΕΕΕΕ-ΜΜ-ΗΗ για τον server· κενό επιτρέπεται μόνο αν δεν είναι υποχρεωτικό
+function dateValue(el, required = true) {
+  const v = el.value.trim();
+  if (!v) { if (required) throw new Error("Γράψε την ημερομηνία αγοράς (ΗΗ/ΜΜ/ΕΕΕΕ)."); return ""; }
+  const m = /^(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{4})$/.exec(v);
+  const d = m && new Date(+m[3], +m[2] - 1, +m[1]);
+  if (!d || d.getDate() !== +m[1] || d.getMonth() !== +m[2] - 1) throw new Error(`Η ημερομηνία «${v}» δεν είναι σωστή. Γράψε τη ως ΗΗ/ΜΜ/ΕΕΕΕ, π.χ. 05/03/2026.`);
+  return localDate(d);
+}
 const fmtDate = (s) => (s ? new Date(s.replace(" ", "T")).toLocaleString("el-GR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit", hour12: false }) : "–");
 // Ημερομηνία του υπολογιστή (όχι UTC): μετά τα μεσάνυχτα να μη βγαίνει η χθεσινή
 const localDate = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
@@ -243,7 +268,7 @@ function priceBox(label, b, checked = true) {
 }
 function cardHtml(p) {
   const chips = [];
-  if (p.purchased) chips.push(`<span class="chip ok">✔ Αγοράστηκε${p.purchased_price ? " " + eur(p.purchased_price) : ""}</span>`);
+  if (p.purchased) chips.push(`<span class="chip ok">✔ Αγοράστηκε${p.purchased_at ? " " + dmy(p.purchased_at) : ""}${p.purchased_price ? " · " + eur(p.purchased_price) : ""}</span>`);
   else if (p.any_in_stock) chips.push(`<span class="chip ok">Διαθέσιμο</span>`);
   else if (p.last_checked) chips.push(`<span class="chip bad">Μη διαθέσιμο</span>`);
   else chips.push(`<span class="chip">Αναμονή ελέγχου…</span>`);
@@ -327,7 +352,7 @@ async function markPurchased(p) {
   modal(`<h2>Αγοράστηκε: ${esc(p.name)}</h2>
     <p class="hint">Τα αγορασμένα προϊόντα σταματούν να ελέγχονται. Το ιστορικό τιμών μένει.</p>
     <div class="two"><div><label>Τιμή αγοράς (€)</label><input id="pp-price" value="${best ? num2(best.price) : ""}"></div>
-    <div><label>Ημερομηνία αγοράς</label><input id="pp-date" type="date" value="${localDate()}"></div></div>
+    <div><label>Ημερομηνία αγοράς</label>${dateField("pp-date", localDate())}</div></div>
     <div class="two"><div><label>Κατάστημα</label><input id="pp-shop" value="${esc(best ? best.shop : "")}"></div>
     <div><label>Εγγύηση</label>${warrantyInput("main", 24)}</div></div>
     <div class="section"><h3>Θέλεις να ανεβάσεις την απόδειξη ή το τιμολόγιο;</h3>
@@ -343,6 +368,7 @@ async function markPurchased(p) {
     </div>
     <div class="btns"><button data-close>Άκυρο</button><button class="primary" id="pp-save">✔ Αγοράστηκε</button></div>`,
     { wide: true, onMount: (m, close) => {
+        wireDateFields(m);
         $("#pp-multi", m).onchange = () => ($("#pp-others", m).style.display = $("#pp-multi", m).checked ? "" : "none");
         let nNew = 0;
         $("#pp-add-new", m).onclick = () => {
@@ -372,7 +398,7 @@ async function markPurchased(p) {
           }
           const fd = new FormData();
           fd.append("items", JSON.stringify(items));
-          fd.append("date", $("#pp-date", m).value);
+          fd.append("date", dateValue($("#pp-date", m)));
           fd.append("shop", $("#pp-shop", m).value);
           const f = $("#pp-file", m).files[0];
           if (f) fd.append("receipt", f);
@@ -413,9 +439,9 @@ async function renderWarranties() {
     <tr><th>Προϊόν</th><th>Αγορά</th><th>Εγγύηση</th><th>Λήξη</th><th>Απόδειξη</th><th></th></tr>
     ${rows.map((r) => `<tr>
       <td><b>${esc(r.name)}</b><div><select class="cat-pick" data-cat-of="${r.id}" title="Κατηγορία">${categoryOptions(r.category_id, true)}</select></div></td>
-      <td>${r.purchased_at ? new Date(r.purchased_at + "T00:00:00").toLocaleDateString("el-GR") : "–"}<div class="hint">${esc(r.purchased_shop || "")} ${r.purchased_price ? eur(r.purchased_price) : ""}</div></td>
+      <td>${dmy(r.purchased_at)}<div class="hint">${esc(r.purchased_shop || "")} ${r.purchased_price ? eur(r.purchased_price) : ""}</div></td>
       <td>${esc(r.warranty_label)}</td>
-      <td>${r.warranty_end ? new Date(r.warranty_end + "T00:00:00").toLocaleDateString("el-GR") : "–"}<div>${chip(r)}</div></td>
+      <td>${dmy(r.warranty_end)}<div>${chip(r)}</div></td>
       <td>${r.receipt_id ? `<button class="small" data-open-r="${r.receipt_id}">📄 Άνοιγμα</button><div class="hint">${esc((r.receipt_file || "").split("/").pop())}</div>`
         : `<button class="small" data-up="${r.id}">⬆ Ανέβασμα</button>`}</td>
       <td style="white-space:nowrap"><button class="small" data-ew="${r.id}">✎</button>
@@ -448,7 +474,7 @@ function uploadReceipt(p, all) {
   modal(`<h2>Απόδειξη για: ${esc(p.name)}</h2>
     <input type="file" id="ur-file" accept="${ACCEPT_RECEIPT}">
     ${others.length ? `<label style="margin-top:14px">Η ίδια απόδειξη αφορά και:</label>
-      ${others.map((o) => `<label class="inline"><input type="checkbox" value="${o.id}" data-also> ${esc(o.name)} <span class="hint">${esc(o.purchased_at || "")}</span></label>`).join("")}` : ""}
+      ${others.map((o) => `<label class="inline"><input type="checkbox" value="${o.id}" data-also> ${esc(o.name)} <span class="hint">${o.purchased_at ? dmy(o.purchased_at) : ""}</span></label>`).join("")}` : ""}
     <div class="btns"><button data-close>Άκυρο</button><button class="primary" id="ur-save">Ανέβασμα</button></div>`,
     { onMount: (m, close) => {
         $("#ur-save", m).onclick = () => run(async () => {
@@ -465,14 +491,15 @@ function uploadReceipt(p, all) {
 
 function editWarranty(p) {
   modal(`<h2>Στοιχεία αγοράς: ${esc(p.name)}</h2>
-    <div class="two"><div><label>Ημερομηνία αγοράς</label><input id="ew-date" type="date" value="${esc(p.purchased_at || "")}"></div>
+    <div class="two"><div><label>Ημερομηνία αγοράς</label>${dateField("ew-date", p.purchased_at || "")}</div>
     <div><label>Εγγύηση</label>${warrantyInput("ew", p.warranty_months || 0)}</div></div>
     <div class="two"><div><label>Τιμή (€)</label><input id="ew-price" value="${p.purchased_price ?? ""}"></div>
     <div><label>Κατάστημα</label><input id="ew-shop" value="${esc(p.purchased_shop || "")}"></div></div>
     <div class="btns"><button data-close>Άκυρο</button><button class="primary" id="ew-save">Αποθήκευση</button></div>`,
     { onMount: (m, close) => {
+        wireDateFields(m);
         $("#ew-save", m).onclick = () => run(async () => {
-          await api("PUT", `/api/products/${p.id}/warranty`, { date: $("#ew-date", m).value, warranty_months: warrantyMonths($("[data-w=ew]", m)),
+          await api("PUT", `/api/products/${p.id}/warranty`, { date: dateValue($("#ew-date", m), false), warranty_months: warrantyMonths($("[data-w=ew]", m)),
             price: $("#ew-price", m).value, shop: $("#ew-shop", m).value });
           close(); render();
         });
@@ -579,7 +606,7 @@ async function renderDetail() {
     <button class="link" id="back">← Πίσω στη λίστα</button>
     <h2>${esc(p.name)}</h2>
     <div class="meta">${esc(p.category_name || "Χωρίς κατηγορία")}${p.sector_name ? ` · <span title="Η αναζήτηση γίνεται μόνο σε σχετικά καταστήματα">${esc(p.sector_name)}</span>` : ""} ${p.ean ? "· EAN " + esc(p.ean) : ""} ${p.mpn ? "· Κωδ. " + esc(p.mpn) : ""}
-      ${p.target_price ? "· Στόχος " + eur(p.target_price) : ""} ${p.purchased ? `· <b>Αγοράστηκε ${esc(p.purchased_at || "")} ${p.purchased_price ? eur(p.purchased_price) : ""} ${esc(p.purchased_shop || "")}</b>` : ""}</div>
+      ${p.target_price ? "· Στόχος " + eur(p.target_price) : ""} ${p.purchased ? `· <b>Αγοράστηκε ${p.purchased_at ? dmy(p.purchased_at) : ""} ${p.purchased_price ? eur(p.purchased_price) : ""} ${esc(p.purchased_shop || "")}</b>` : ""}</div>
     ${p.notes ? `<p>${esc(p.notes)}</p>` : ""}
     <div class="row" style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
       <button id="d-check">⟳ Έλεγχος τώρα</button>
@@ -792,7 +819,7 @@ async function renderSettings() {
       <label class="inline"><input type="checkbox" id="s-autoupd" ${s.auto_update ? "checked" : ""}> Αυτόματη ενημέρωση της εφαρμογής όταν βγαίνει νέα έκδοση</label>
       <p class="hint">Έκδοση <b>${esc(state.status.version || "")}</b> · <span id="s-upd-msg">${esc(state.status.update?.message || "")}</span>
         <button class="link" id="s-upd-check">Έλεγχος τώρα</button> <button class="link" id="s-upd-install" style="display:${state.status.update?.available ? "" : "none"}">Εγκατάσταση τώρα</button></p>
-      <p class="hint">Τιμές σε ξένο νόμισμα ($, £ κ.ά.) δείχνονται και σε € με τις ισοτιμίες της Ευρωπαϊκής Κεντρικής Τράπεζας<span id="s-fx">${state.status.fx_date ? ` (της ${new Date(state.status.fx_date + "T00:00:00").toLocaleDateString("el-GR")})` : ""}</span>, που ανανεώνονται σε κάθε έλεγχο. <button class="link" id="s-fx-refresh">Ανανέωση τώρα</button></p>
+      <p class="hint">Τιμές σε ξένο νόμισμα ($, £ κ.ά.) δείχνονται και σε € με τις ισοτιμίες της Ευρωπαϊκής Κεντρικής Τράπεζας<span id="s-fx">${state.status.fx_date ? ` (της ${dmy(state.status.fx_date)})` : ""}</span>, που ανανεώνονται σε κάθε έλεγχο. <button class="link" id="s-fx-refresh">Ανανέωση τώρα</button></p>
       <label>Υπενθύμιση πριν λήξει μια εγγύηση (μέρες, 0 = όχι)</label><input id="s-wrem" type="number" min="0" max="365" value="${s.warranty_reminder_days ?? 30}" style="width:120px">
     </div>
     <div class="section"><h3>Καταστήματα</h3>
@@ -993,7 +1020,7 @@ async function renderSettings() {
         });
         $("#s-fx-refresh", m).onclick = () => run(async () => {
           const r = await api("POST", "/api/fx/refresh");
-          $("#s-fx", m).textContent = ` (της ${new Date(r.date + "T00:00:00").toLocaleDateString("el-GR")})`;
+          $("#s-fx", m).textContent = ` (της ${dmy(r.date)})`;
           toast(`Ισοτιμίες: 1 € = ${String(r.usd).replace(".", ",")} $ · ${String(r.gbp).replace(".", ",")} £`);
         });
         $("#s-upd-install", m).onclick = () => run(async () => { await api("POST", "/api/update/install"); toast("Η ενημέρωση ξεκίνησε. Η εφαρμογή θα ξανανοίξει μόνη της.", 8000); });
@@ -1092,7 +1119,7 @@ async function pollStatus() {
     statusFails = 0;
     const bf = new Date(s.black_friday + "T00:00:00"), cm = new Date(s.cyber_monday + "T00:00:00");
     const days = Math.ceil((bf - new Date()) / 86400000);
-    $("#bf-box").innerHTML = `<b>Black Friday:</b> ${bf.toLocaleDateString("el-GR")}<br><b>Cyber Monday:</b> ${cm.toLocaleDateString("el-GR")}<br>` +
+    $("#bf-box").innerHTML = `<b>Black Friday:</b> ${dmyOf(bf)}<br><b>Cyber Monday:</b> ${dmyOf(cm)}<br>` +
       (days > 0 ? `σε ${days} μέρες` : days > -4 ? "<b>Τώρα!</b>" : "") + (s.bf_mode ? "<br>Έλεγχοι κάθε " + String(s.interval_hours).replace(".", ",") + (s.interval_hours === 1 ? " ώρα" : " ώρες") : "");
     if (lastRunning && !s.running && state.view !== "settings") refresh();  // όχι στις Ρυθμίσεις: θα χάνονταν οι αλλαγές
     lastRunning = s.running;

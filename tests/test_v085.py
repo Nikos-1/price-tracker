@@ -498,3 +498,45 @@ def test_availability_inside_product_sidebar_is_read():
       <div class="product-sidebar"><span class="price">499,00 €</span><p>Εξαντλήθηκε</p>
       <button class="add-to-cart" disabled>Προσθήκη στο καλάθι</button></div></main></body></html>"""
     assert extract(html, "https://shop.gr/p").in_stock is False
+
+
+def test_export_purchase_dates_are_ddmmyyyy(tmp_path):
+    from datetime import date
+
+    from openpyxl import load_workbook
+
+    from pricetracker.db import Database
+    from pricetracker.export import export_xlsx
+
+    db = Database(tmp_path / "db.sqlite")
+    pid = db.create_product("Samsung 990 Pro 2TB")
+    db.update_product(pid, purchased=1, purchased_at="2026-03-05", purchased_price=150.0, warranty_months=24)
+    out = export_xlsx(db, tmp_path, tmp_path / "x.xlsx")
+    ws = load_workbook(out)["Εγγυήσεις"]
+    for col, want in ((3, date(2026, 3, 5)), (7, date(2028, 3, 5))):
+        c = ws.cell(2, col)
+        assert c.value.date() == want and c.number_format == "dd/mm/yyyy"
+
+
+def test_second_instance_finds_port_fast(tmp_path, monkeypatch):
+    import time
+
+    from pricetracker import app as appmod
+
+    me = appmod.instance_id(tmp_path)
+    calls = []
+
+    def probe(port):  # μια κλειστή θύρα στα Windows αργεί ~1 δευτ.
+        calls.append(port)
+        if port == appmod.PORT + 3:
+            return me
+        time.sleep(0.5)
+        return None
+
+    monkeypatch.setattr(appmod, "_probe", probe)
+    t = time.time()
+    assert appmod._our_ports(tmp_path) == [appmod.PORT + 3]
+    assert time.time() - t < 3  # παράλληλα, όχι 20 × 0,5 δευτ.
+    (tmp_path / appmod.PORT_FILE).write_text(str(appmod.PORT + 3))
+    calls.clear()
+    assert appmod._our_ports(tmp_path) == [appmod.PORT + 3] and calls == [appmod.PORT + 3]

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 from openpyxl import Workbook
@@ -12,6 +12,16 @@ from openpyxl.utils import get_column_letter
 
 from . import analysis, fx, warranty
 from .shops import REGION_LABELS, country_label
+
+
+def _day(v):
+    """«2026-03-05» → ημερομηνία του Excel (εμφανίζεται ΗΗ/ΜΜ/ΕΕΕΕ)· ό,τι δεν διαβάζεται μένει όπως είναι."""
+    if not v:
+        return v
+    try:
+        return date.fromisoformat(str(v)[:10])
+    except ValueError:
+        return v
 
 
 def _where(l):
@@ -112,9 +122,11 @@ def export_xlsx(db, data_dir: Path, out_path: Path, product_ids: list[int] | Non
                       "Μέρες που απομένουν", "Απόδειξη"])
         for p in purchased:
             w = warranty.warranty_info(p)
-            wws.append([p["name"], p.get("category_name") or "", p.get("purchased_at"), p.get("purchased_shop"),
+            wws.append([p["name"], p.get("category_name") or "", _day(p.get("purchased_at")), p.get("purchased_shop"),
                         p.get("purchased_price"), warranty.months_label(p.get("warranty_months")),
-                        w["warranty_end"], w["warranty_days_left"], p.get("receipt_name") or ""])
+                        _day(w["warranty_end"]), w["warranty_days_left"], p.get("receipt_name") or ""])
+            for col in (3, 7):  # ημερομηνίες ως ΗΗ/ΜΜ/ΕΕΕΕ
+                wws.cell(wws.max_row, col).number_format = "dd/mm/yyyy"
             if p.get("receipt_file"):
                 c = wws.cell(wws.max_row, 9)
                 c.hyperlink = (Path(data_dir) / p["receipt_file"]).as_uri()
