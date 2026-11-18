@@ -9,7 +9,7 @@ const CURRENCIES = ["EUR", "USD", "GBP", "CHF", "PLN", "CZK", "SEK", "DKK", "NOK
 const money = (v, cur, v_eur) => (v == null ? "–" : !cur || cur === "EUR" || v_eur == null ? eur(v, cur)
   : `${eur(v, cur)} <span class="conv" title="Με την ισοτιμία της Ευρωπαϊκής Κεντρικής Τράπεζας">/ ≈${eur(v_eur)}</span>`);
 // Ημερομηνία χωρίς ώρα πάντα ως ΗΗ/ΜΜ/ΕΕΕΕ (π.χ. 05/03/2026), από «2026-03-05» ή «2026-03-05 10:00»
-const dmy = (s) => { const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(s || "")); return m ? `${m[3]}/${m[2]}/${m[1]}` : (s ? String(s) : "–"); };
+const dmy = (s) => { const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(s || "")); return m ? `${m[3]}/${m[2]}/${m[1]}` : (s ? esc(String(s)) : "–"); };
 const dmyOf = (d) => `${String(d.getDate()).padStart(2, "0")}/${String(d.getMonth() + 1).padStart(2, "0")}/${d.getFullYear()}`;
 // Πεδίο ημερομηνίας που δείχνει πάντα ΗΗ/ΜΜ/ΕΕΕΕ, όποια γλώσσα κι αν έχουν τα Windows (το <input type="date"
 // ακολουθεί τη μορφή του συστήματος). Το 📅 ανοίγει το ημερολόγιο· γράφεται και με το χέρι, π.χ. 5/3/2026.
