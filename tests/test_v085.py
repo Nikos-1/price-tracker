@@ -516,3 +516,27 @@ def test_export_purchase_dates_are_ddmmyyyy(tmp_path):
     for col, want in ((3, date(2026, 3, 5)), (7, date(2028, 3, 5))):
         c = ws.cell(2, col)
         assert c.value.date() == want and c.number_format == "dd/mm/yyyy"
+
+
+def test_second_instance_finds_port_fast(tmp_path, monkeypatch):
+    import time
+
+    from pricetracker import app as appmod
+
+    me = appmod.instance_id(tmp_path)
+    calls = []
+
+    def probe(port):  # μια κλειστή θύρα στα Windows αργεί ~1 δευτ.
+        calls.append(port)
+        if port == appmod.PORT + 3:
+            return me
+        time.sleep(0.5)
+        return None
+
+    monkeypatch.setattr(appmod, "_probe", probe)
+    t = time.time()
+    assert appmod._our_ports(tmp_path) == [appmod.PORT + 3]
+    assert time.time() - t < 3  # παράλληλα, όχι 20 × 0,5 δευτ.
+    (tmp_path / appmod.PORT_FILE).write_text(str(appmod.PORT + 3))
+    calls.clear()
+    assert appmod._our_ports(tmp_path) == [appmod.PORT + 3] and calls == [appmod.PORT + 3]

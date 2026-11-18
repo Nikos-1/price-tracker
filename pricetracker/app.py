@@ -306,13 +306,33 @@ def choose_port(app_dir: Path) -> int:
     return PORT
 
 
+PORT_FILE = "instance.port"
+
+
+def _our_ports(app_dir: Path) -> list[int]:
+    """Οι θύρες όπου ακούει η εκτέλεση του ίδιου χρήστη. Πρώτα αυτή που έγραψε στο instance.port· αλλιώς όλες
+    μαζί παράλληλα. Στα Windows μια κλειστή θύρα αργεί ~1 δευτ. να απαντήσει, οπότε 20 θύρες μία-μία έπαιρναν
+    πάνω από 20 δευτ. και η δεύτερη εκκίνηση δεν έκλεινε έγκαιρα."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    me = instance_id(app_dir)
+    try:
+        saved = int((app_dir / PORT_FILE).read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        saved = None
+    if saved and _probe(saved) == me:
+        return [saved]
+    ports = list(range(PORT, PORT + 20))
+    with ThreadPoolExecutor(max_workers=len(ports)) as ex:
+        found = list(ex.map(_probe, ports))
+    return [p for p, ident in zip(ports, found) if ident == me]
+
+
 def already_running(app_dir: Path | None = None) -> bool:
     """Εμφανίζει το παράθυρο της εκτέλεσης που τρέχει ήδη για τον ίδιο χρήστη."""
     ports = [PORT]
     if app_dir is not None:
-        me = instance_id(app_dir)
-        ours = [p for p in range(PORT, PORT + 20) if _probe(p) == me]
-        ports = ours or [PORT]  # παλιότερη έκδοση χωρίς /api/instance: η προεπιλεγμένη θύρα
+        ports = _our_ports(app_dir) or [PORT]  # παλιότερη έκδοση χωρίς /api/instance: η προεπιλεγμένη θύρα
     for port in ports:
         try:
             req = urllib.request.Request(f"http://127.0.0.1:{port}/api/window/show", data=b"{}", method="POST",
@@ -370,6 +390,10 @@ def main(argv=None):
         already_running(app_dir)  # εμφανίζει το παράθυρο της εκτέλεσης που τρέχει ήδη
         return 0
     PORT = choose_port(app_dir)
+    try:  # η δεύτερη εκκίνηση βρίσκει αμέσως τη θύρα, χωρίς να ψάχνει
+        (app_dir / PORT_FILE).write_text(str(PORT), encoding="utf-8")
+    except OSError:
+        pass
     exports_dir = data_dir / "exports" if args.data else default_exports_dir(data_dir)
     moved = move_internal_files(data_dir, app_dir, exports_dir)
     setup_logging(app_dir)
