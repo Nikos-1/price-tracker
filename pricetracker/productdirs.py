@@ -90,6 +90,14 @@ def _remove_if_empty(d: Path, root: Path):
         pass
 
 
+def remove_empty_parents(path: Path, data_dir: Path):
+    """Σβήνει τους άδειους φακέλους πάνω από ένα αρχείο που σβήστηκε, ως τον φάκελο δεδομένων."""
+    d = Path(path).parent
+    while d != Path(data_dir) and not d.exists() and d != d.parent:  # ήδη σβησμένοι: από τον πρώτο που υπάρχει
+        d = d.parent
+    _remove_if_empty(d, Path(data_dir))
+
+
 def sync_all(db, data_dir: Path):
     """Στην εκκίνηση: παλιοί φάκελοι screenshots\\<id>_<όνομα> → Προϊόντα\\<ημερομηνία> <όνομα>."""
     for p in db.list_products():

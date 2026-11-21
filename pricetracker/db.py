@@ -181,6 +181,20 @@ class Database:
             c.executescript(SCHEMA)
             self._migrate(c)
             self._seed(c)
+            vacuumed = c.execute("SELECT 1 FROM settings WHERE key='secure_vacuum_v1'").fetchone()
+        if not vacuumed:
+            # Μία φορά: ό,τι είχε σβηστεί πριν το secure_delete καθαρίζει και από τα κενά σημεία του αρχείου
+            try:
+                with self._lock:
+                    v = sqlite3.connect(self.path, timeout=30, isolation_level=None)
+                    try:
+                        v.execute("VACUUM")
+                    finally:
+                        v.close()
+                with self.conn() as c:
+                    c.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('secure_vacuum_v1','true')")
+            except sqlite3.Error:
+                pass  # π.χ. λίγος χώρος στον δίσκο: ξαναδοκιμάζει στην επόμενη εκκίνηση
 
     @staticmethod
     def _migrate(c):
@@ -201,6 +215,7 @@ class Database:
             c = sqlite3.connect(self.path, timeout=30)
             c.row_factory = sqlite3.Row
             c.execute("PRAGMA foreign_keys = ON")
+            c.execute("PRAGMA secure_delete = ON")  # ό,τι σβήνεται γράφεται από πάνω με μηδενικά, δεν μένει στο αρχείο
             try:
                 yield c
                 c.commit()

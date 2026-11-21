@@ -1,6 +1,7 @@
 """Τοπικός web server (μόνο 127.0.0.1) που σερβίρει το περιβάλλον της εφαρμογής και το API."""
 from __future__ import annotations
 
+import contextlib
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -127,12 +128,50 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None, exports_dir
             except OSError:
                 pass
 
+    def drop_outbox_for(pid: int, shots: set, folders: list):
+        """Email σε αναμονή για το προϊόν: ένα email μόνο γι' αυτό δεν στέλνεται πια· ένα που αφορά κι άλλα
+        προϊόντα στέλνεται χωρίς τα screenshots του. Με το ίδιο lock που χρησιμοποιεί η ουρά του worker."""
+        mine = {(data_dir / s).resolve() for s in shots}
+        dirs = [Path(d).resolve() for d in folders]
+
+        def is_mine(a):
+            r = Path(a).resolve()
+            return r in mine or any(d in r.parents for d in dirs)
+
+        with getattr(worker, "_outbox_lock", None) or contextlib.nullcontext():
+            box = db.get_settings().get("email_outbox") or []
+            out = []
+            for m in box:
+                if m.get("product_ids") and set(m["product_ids"]) == {pid}:
+                    continue
+                att = list(m.get("attachments") or [])
+                keep = [a for a in att if not is_mine(a)]
+                out.append({**m, "attachments": keep} if len(keep) != len(att) else m)
+            if out != box:
+                db.set_settings({"email_outbox": out})
+
+    def drop_receipt_if_unused(rid, keep_file=False):
+        """Μια απόδειξη που δεν ανήκει πια σε κανένα προϊόν σβήνεται (εγγραφή και αρχείο). keep_file: το αρχείο
+        μένει στον φάκελο Αποδείξεις (στο «Ξανά παρακολούθηση», όπως λέει το μήνυμα επιβεβαίωσης)."""
+        receipt = db.get_receipt(rid) if rid else None
+        if not receipt or db.receipt_products(receipt["id"]):
+            return
+        db.delete_receipt(receipt["id"])
+        if keep_file:
+            return
+        remove_files([receipt["file"]])
+        receipts_root = data_dir / receipts.RECEIPTS_DIR
+        productdirs.remove_empty_parents(data_dir / receipt["file"], data_dir)  # π.χ. ο άδειος φάκελος της χρονιάς
+        if receipts_root.is_dir() and not any(receipts_root.iterdir()):
+            receipts_root.rmdir()
+
     def purge_search_data(pid: int):
         """Σβήνει μόνο τα δεδομένα αναζήτησης: καταστήματα του προϊόντος, τιμές, ιστορικό και screenshots."""
         shots = db.product_screenshots(pid)
         folders = productdirs.all_dirs(db, data_dir, pid)
         for l in db.list_listings(product_id=pid, status=None):
             db.delete_listing(l["id"])  # το ιστορικό σβήνεται μαζί (ON DELETE CASCADE)
+        drop_outbox_for(pid, shots, folders)
         remove_files(shots)
         productdirs.remove(folders, data_dir)  # ο φάκελος του προϊόντος με ό,τι έχει μέσα
 
@@ -147,16 +186,11 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None, exports_dir
             return
         shots = db.product_screenshots(pid)
         folders = productdirs.all_dirs(db, data_dir, pid)
-        receipt = db.get_receipt(p["receipt_id"]) if p.get("receipt_id") else None
         db.delete_product(pid)  # listings και price_history σβήνονται μαζί (ON DELETE CASCADE)
+        drop_outbox_for(pid, shots, folders)
         remove_files(shots)
         productdirs.remove(folders, data_dir)  # ο φάκελος του προϊόντος με ό,τι έχει μέσα
-        if receipt and not db.receipt_products(receipt["id"]):
-            db.delete_receipt(receipt["id"])
-            remove_files([receipt["file"]])
-            receipts_root = data_dir / receipts.RECEIPTS_DIR
-            if receipts_root.is_dir() and not any(receipts_root.iterdir()):
-                receipts_root.rmdir()
+        drop_receipt_if_unused(p.get("receipt_id"))
         notified = db.get_settings().get("warranty_notified")
         if isinstance(notified, list) and any(str(k).split(":")[0] == str(pid) for k in notified):
             db.set_settings({"warranty_notified": [k for k in notified if str(k).split(":")[0] != str(pid)]})
@@ -437,9 +471,16 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None, exports_dir
         if b.get("purchased", True):
             db.update_product(pid, purchased=1, purchased_at=b.get("date") or datetime.now().strftime("%Y-%m-%d"),
                               purchased_price=_num(b.get("price")), purchased_shop=b.get("shop"))
-        else:
+            purge_search_data(pid)  # μετά την αγορά μένουν μόνο αγορά, εγγύηση και απόδειξη
+        elif (db.get_product(pid) or {}).get("purchased"):
+            old = (db.get_product(pid) or {}).get("receipt_id")
             db.update_product(pid, purchased=0, purchased_at=None, purchased_price=None, purchased_shop=None,
                               receipt_id=None, warranty_months=None)
+            drop_receipt_if_unused(old, keep_file=True)
+            notified = db.get_settings().get("warranty_notified")
+            if isinstance(notified, list) and any(str(k).split(":")[0] == str(pid) for k in notified):
+                db.set_settings({"warranty_notified": [k for k in notified if str(k).split(":")[0] != str(pid)]})
+            worker.enqueue("search_product", product_id=pid)  # ξανά παρακολούθηση: ψάχνει ξανά τα καταστήματα
         return jsonify({"ok": True})
 
     @app.delete("/api/products/<int:pid>")
@@ -449,6 +490,8 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None, exports_dir
 
     @app.post("/api/products/<int:pid>/search")
     def search_product(pid):
+        if (db.get_product(pid) or {}).get("purchased"):
+            return err("Το προϊόν έχει αγοραστεί: δεν ψάχνεται πια στα καταστήματα")
         worker.enqueue("search_product", product_id=pid)
         return jsonify({"ok": True})
 
@@ -846,6 +889,22 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None, exports_dir
             return err("Διάλεξε τουλάχιστον ένα προϊόν")
         when = form.get("date") or datetime.now().strftime("%Y-%m-%d")
         shop = (form.get("shop") or "").strip() or None
+        # Πρώτα ελέγχονται όλα (τιμή, εγγύηση, προϊόν) και μετά γίνεται η αγορά: ένα λάθος στο δεύτερο προϊόν
+        # δεν αφήνει το πρώτο αγορασμένο με σβησμένο ιστορικό.
+        plan = []
+        for it in items:
+            pid = it.get("product_id")
+            name = (it.get("name") or "").strip()
+            if not pid and not name:
+                continue
+            if pid:
+                pid = int(pid)
+                if not db.get_product(pid):
+                    return err("Το προϊόν δεν βρέθηκε")
+            plan.append((pid, name, it, dict(purchased=1, purchased_at=when, purchased_price=_num(it.get("price")),
+                                             purchased_shop=shop, warranty_months=_months(it.get("warranty_months")))))
+        if not plan:
+            return err("Διάλεξε τουλάχιστον ένα προϊόν")
         receipt_id = None
         f = request.files.get("receipt")
         if f and f.filename:
@@ -853,18 +912,16 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None, exports_dir
         elif form.get("receipt_id"):
             receipt_id = int(form["receipt_id"])
         done = []
-        for it in items:
-            pid = it.get("product_id")
+        for pid, name, it, fields in plan:
             if not pid:
-                name = (it.get("name") or "").strip()
-                if not name:
-                    continue
                 pid = db.create_product(name, _cat(it.get("category_id")))
-            fields = dict(purchased=1, purchased_at=when, purchased_price=_num(it.get("price")),
-                          purchased_shop=shop, warranty_months=_months(it.get("warranty_months")))
+            old_receipt = (db.get_product(int(pid)) or {}).get("receipt_id")
             if receipt_id:
                 fields["receipt_id"] = receipt_id
             db.update_product(int(pid), **fields)
+            purge_search_data(int(pid))  # μετά την αγορά μένουν μόνο αγορά, εγγύηση και απόδειξη
+            if receipt_id and old_receipt and old_receipt != receipt_id:
+                drop_receipt_if_unused(old_receipt)  # η παλιά απόδειξη αντικαταστάθηκε
             done.append(int(pid))
         if receipt_id:
             receipts.organize(db, data_dir, receipt_id)
@@ -880,8 +937,11 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None, exports_dir
             return err("Δεν επιλέχθηκε αρχείο")
         rid = save_receipt(f, p.get("purchased_shop"), p.get("purchased_at"))
         others = [int(x) for x in request.form.getlist("also") if x.isdigit()]
+        replaced = {(db.get_product(x) or {}).get("receipt_id") for x in [pid] + others} - {None, rid}
         for x in [pid] + others:
             db.update_product(x, receipt_id=rid)
+        for old in replaced:  # η παλιά απόδειξη, αν δεν ανήκει πια σε κανένα προϊόν
+            drop_receipt_if_unused(old)
         receipts.organize(db, data_dir, rid)
         return jsonify({"ok": True, "receipt_id": rid})
 
@@ -1038,4 +1098,12 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None, exports_dir
         return resp
 
     save_settings_file()
+    # Προϊόντα που αγοράστηκαν πριν σβήνονται τα δεδομένα αναζήτησης με την αγορά (ή όσο έτρεχε αναζήτηση):
+    # μένουν μόνο η αγορά, η εγγύηση και η απόδειξη. Τρέχει σε κάθε εκκίνηση· κοστίζει μόνο όταν υπάρχει κάτι.
+    for p in db.list_products(purchased=True):
+        if db.list_listings(product_id=p["id"], status=None) or productdirs.all_dirs(db, data_dir, p["id"]):
+            try:
+                purge_search_data(p["id"])
+            except Exception:  # noqa: BLE001 - ένα κλειδωμένο αρχείο δεν σταματά την εκκίνηση
+                app.logger.warning("Καθαρισμός αγορασμένου προϊόντος %s απέτυχε", p["id"], exc_info=True)
     return app
