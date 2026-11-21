@@ -1098,4 +1098,12 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None, exports_dir
         return resp
 
     save_settings_file()
+    # Προϊόντα που αγοράστηκαν πριν σβήνονται τα δεδομένα αναζήτησης με την αγορά (ή όσο έτρεχε αναζήτηση):
+    # μένουν μόνο η αγορά, η εγγύηση και η απόδειξη. Τρέχει σε κάθε εκκίνηση· κοστίζει μόνο όταν υπάρχει κάτι.
+    for p in db.list_products(purchased=True):
+        if db.list_listings(product_id=p["id"], status=None) or productdirs.all_dirs(db, data_dir, p["id"]):
+            try:
+                purge_search_data(p["id"])
+            except Exception:  # noqa: BLE001 - ένα κλειδωμένο αρχείο δεν σταματά την εκκίνηση
+                app.logger.warning("Καθαρισμός αγορασμένου προϊόντος %s απέτυχε", p["id"], exc_info=True)
     return app

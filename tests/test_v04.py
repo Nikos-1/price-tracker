@@ -304,3 +304,20 @@ def test_purchased_product_is_not_searched(tmp_path):
     w = Worker(db, tmp_path)
     w.search_shops = lambda *a: (_ for _ in ()).throw(AssertionError("δεν έπρεπε να ψάξει"))
     assert w.search_product(pid) == []
+
+
+def test_already_purchased_products_cleaned_on_start(tmp_path):
+    db = Database(tmp_path / "db.sqlite")
+    pid = db.create_product("PSU")
+    lid = db.add_listing(pid, "https://www.plaisio.gr/p/1")
+    shot = _shot(tmp_path, db, pid, lid, "a")
+    db.update_product(pid, purchased=1, purchased_at="2026-11-01", purchased_price=90.0, warranty_months=24)
+    tracked = db.create_product("Other")
+    lid2 = db.add_listing(tracked, "https://www.plaisio.gr/p/2")
+    other = _shot(tmp_path, db, tracked, lid2, "b")
+    create_app(db, FakeWorker(), tmp_path)  # εκκίνηση της εφαρμογής
+    p = db.get_product(pid)
+    assert p["purchased"] == 1 and p["purchased_price"] == 90.0 and p["warranty_months"] == 24
+    assert db.list_listings(pid, status=None) == [] and not shot.exists()
+    shots = db.product_screenshots(tracked)  # τα υπόλοιπα δεν αγγίζονται (η εκκίνηση τα βάζει στον φάκελό τους)
+    assert db.list_listings(tracked) and shots and all((tmp_path / s).exists() for s in shots)
