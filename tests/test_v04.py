@@ -235,12 +235,15 @@ def test_delete_drops_queued_email_and_leaves_no_trace_in_db_file(tmp_path):
     shot = _shot(tmp_path, db, pid, lid, "a")
     other = _shot(tmp_path, db, keep, lid2, "b")
     db.set_settings({"email_outbox": [
-        {"subject": "Πτώση", "text": "x", "attachments": [str(shot)], "ts": 1},
-        {"subject": "Και τα δύο", "text": "y", "attachments": [str(shot), str(other)], "ts": 2},
+        {"subject": "Πτώση", "text": "x", "attachments": [str(shot)], "ts": 1, "product_ids": [pid]},
+        {"subject": "Και τα δύο", "text": "y", "attachments": [str(shot)], "ts": 2, "product_ids": [pid, keep]},
+        {"subject": "Παλιό", "text": "w", "attachments": [str(shot), str(other)], "ts": 4},
         {"subject": "Εγγύηση", "text": "z", "attachments": [], "ts": 3}]})
     assert c.delete(f"/api/products/{pid}").status_code == 200
     box = db.get_settings()["email_outbox"]
-    assert [m["subject"] for m in box] == ["Και τα δύο", "Εγγύηση"] and box[0]["attachments"] == [str(other)]
+    # μόνο γι' αυτό: δεν στέλνεται· και για άλλο προϊόν: στέλνεται χωρίς τα screenshots του
+    assert [m["subject"] for m in box] == ["Και τα δύο", "Παλιό", "Εγγύηση"]
+    assert box[0]["attachments"] == [] and box[1]["attachments"] == [str(other)]
     raw = b"".join(f.read_bytes() for f in tmp_path.glob("db.sqlite*"))
     assert "ZXQ Unique Laptop".encode() not in raw  # secure_delete: δεν μένει στο αρχείο της βάσης
 
@@ -276,3 +279,28 @@ def test_replaced_receipt_is_removed(tmp_path):
     assert db.get_receipt(r1) is None
     files = [x for x in f1.parent.iterdir()]  # μόνο η νέα απόδειξη (παίρνει το ίδιο όνομα)
     assert len(files) == 1 and files[0].read_bytes() == b"%PDF2"
+
+
+def test_failed_multi_purchase_changes_nothing(tmp_path):
+    db = Database(tmp_path / "db.sqlite")
+    c = create_app(db, FakeWorker(), tmp_path).test_client()
+    a, b = db.create_product("A"), db.create_product("B")
+    lid = db.add_listing(a, "https://www.plaisio.gr/p/1")
+    db.record_check(lid, 100.0, "EUR", True)
+    r = c.post("/api/purchase", json={"items": [{"product_id": a, "warranty_months": 24},
+                                                 {"product_id": b, "warranty_months": 9999}]})
+    assert r.status_code == 400
+    assert db.get_product(a)["purchased"] == 0 and len(db.history()) == 1
+
+
+def test_purchased_product_is_not_searched(tmp_path):
+    db = Database(tmp_path / "db.sqlite")
+    c = create_app(db, FakeWorker(), tmp_path).test_client()
+    pid = db.create_product("PSU")
+    _buy(c, pid)
+    assert c.post(f"/api/products/{pid}/search").status_code == 400
+    from pricetracker.worker import Worker
+
+    w = Worker(db, tmp_path)
+    w.search_shops = lambda *a: (_ for _ in ()).throw(AssertionError("δεν έπρεπε να ψάξει"))
+    assert w.search_product(pid) == []

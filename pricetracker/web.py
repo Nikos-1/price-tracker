@@ -1,6 +1,7 @@
 """Τοπικός web server (μόνο 127.0.0.1) που σερβίρει το περιβάλλον της εφαρμογής και το API."""
 from __future__ import annotations
 
+import contextlib
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -127,26 +128,27 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None, exports_dir
             except OSError:
                 pass
 
-    def drop_outbox_for(shots: set, folders: list):
-        """Email σε αναμονή με screenshots του προϊόντος: τα screenshots βγαίνουν, και ένα email που αφορούσε
-        μόνο αυτό το προϊόν δεν στέλνεται πια."""
+    def drop_outbox_for(pid: int, shots: set, folders: list):
+        """Email σε αναμονή για το προϊόν: ένα email μόνο γι' αυτό δεν στέλνεται πια· ένα που αφορά κι άλλα
+        προϊόντα στέλνεται χωρίς τα screenshots του. Με το ίδιο lock που χρησιμοποιεί η ουρά του worker."""
         mine = {(data_dir / s).resolve() for s in shots}
         dirs = [Path(d).resolve() for d in folders]
 
         def is_mine(a):
             r = Path(a).resolve()
-            return r in mine or any(d == r.parent or d in r.parents for d in dirs)
+            return r in mine or any(d in r.parents for d in dirs)
 
-        box = db.get_settings().get("email_outbox") or []
-        out = []
-        for m in box:
-            att = list(m.get("attachments") or [])
-            keep = [a for a in att if not is_mine(a)]
-            if att and not keep:
-                continue
-            out.append({**m, "attachments": keep} if len(keep) != len(att) else m)
-        if out != box:
-            db.set_settings({"email_outbox": out})
+        with getattr(worker, "_outbox_lock", None) or contextlib.nullcontext():
+            box = db.get_settings().get("email_outbox") or []
+            out = []
+            for m in box:
+                if m.get("product_ids") and set(m["product_ids"]) == {pid}:
+                    continue
+                att = list(m.get("attachments") or [])
+                keep = [a for a in att if not is_mine(a)]
+                out.append({**m, "attachments": keep} if len(keep) != len(att) else m)
+            if out != box:
+                db.set_settings({"email_outbox": out})
 
     def drop_receipt_if_unused(rid, keep_file=False):
         """Μια απόδειξη που δεν ανήκει πια σε κανένα προϊόν σβήνεται (εγγραφή και αρχείο). keep_file: το αρχείο
@@ -159,7 +161,7 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None, exports_dir
             return
         remove_files([receipt["file"]])
         receipts_root = data_dir / receipts.RECEIPTS_DIR
-        productdirs.remove_empty_parents(data_dir / receipt["file"], data_dir)
+        productdirs.remove_empty_parents(data_dir / receipt["file"], data_dir)  # π.χ. ο άδειος φάκελος της χρονιάς
         if receipts_root.is_dir() and not any(receipts_root.iterdir()):
             receipts_root.rmdir()
 
@@ -169,7 +171,7 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None, exports_dir
         folders = productdirs.all_dirs(db, data_dir, pid)
         for l in db.list_listings(product_id=pid, status=None):
             db.delete_listing(l["id"])  # το ιστορικό σβήνεται μαζί (ON DELETE CASCADE)
-        drop_outbox_for(shots, folders)
+        drop_outbox_for(pid, shots, folders)
         remove_files(shots)
         productdirs.remove(folders, data_dir)  # ο φάκελος του προϊόντος με ό,τι έχει μέσα
 
@@ -185,7 +187,7 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None, exports_dir
         shots = db.product_screenshots(pid)
         folders = productdirs.all_dirs(db, data_dir, pid)
         db.delete_product(pid)  # listings και price_history σβήνονται μαζί (ON DELETE CASCADE)
-        drop_outbox_for(shots, folders)
+        drop_outbox_for(pid, shots, folders)
         remove_files(shots)
         productdirs.remove(folders, data_dir)  # ο φάκελος του προϊόντος με ό,τι έχει μέσα
         drop_receipt_if_unused(p.get("receipt_id"))
@@ -470,7 +472,7 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None, exports_dir
             db.update_product(pid, purchased=1, purchased_at=b.get("date") or datetime.now().strftime("%Y-%m-%d"),
                               purchased_price=_num(b.get("price")), purchased_shop=b.get("shop"))
             purge_search_data(pid)  # μετά την αγορά μένουν μόνο αγορά, εγγύηση και απόδειξη
-        else:
+        elif (db.get_product(pid) or {}).get("purchased"):
             old = (db.get_product(pid) or {}).get("receipt_id")
             db.update_product(pid, purchased=0, purchased_at=None, purchased_price=None, purchased_shop=None,
                               receipt_id=None, warranty_months=None)
@@ -488,6 +490,8 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None, exports_dir
 
     @app.post("/api/products/<int:pid>/search")
     def search_product(pid):
+        if (db.get_product(pid) or {}).get("purchased"):
+            return err("Το προϊόν έχει αγοραστεί: δεν ψάχνεται πια στα καταστήματα")
         worker.enqueue("search_product", product_id=pid)
         return jsonify({"ok": True})
 
@@ -885,6 +889,22 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None, exports_dir
             return err("Διάλεξε τουλάχιστον ένα προϊόν")
         when = form.get("date") or datetime.now().strftime("%Y-%m-%d")
         shop = (form.get("shop") or "").strip() or None
+        # Πρώτα ελέγχονται όλα (τιμή, εγγύηση, προϊόν) και μετά γίνεται η αγορά: ένα λάθος στο δεύτερο προϊόν
+        # δεν αφήνει το πρώτο αγορασμένο με σβησμένο ιστορικό.
+        plan = []
+        for it in items:
+            pid = it.get("product_id")
+            name = (it.get("name") or "").strip()
+            if not pid and not name:
+                continue
+            if pid:
+                pid = int(pid)
+                if not db.get_product(pid):
+                    return err("Το προϊόν δεν βρέθηκε")
+            plan.append((pid, name, it, dict(purchased=1, purchased_at=when, purchased_price=_num(it.get("price")),
+                                             purchased_shop=shop, warranty_months=_months(it.get("warranty_months")))))
+        if not plan:
+            return err("Διάλεξε τουλάχιστον ένα προϊόν")
         receipt_id = None
         f = request.files.get("receipt")
         if f and f.filename:
@@ -892,16 +912,10 @@ def create_app(db, worker, data_dir: Path, shell=None, updater=None, exports_dir
         elif form.get("receipt_id"):
             receipt_id = int(form["receipt_id"])
         done = []
-        for it in items:
-            pid = it.get("product_id")
+        for pid, name, it, fields in plan:
             if not pid:
-                name = (it.get("name") or "").strip()
-                if not name:
-                    continue
                 pid = db.create_product(name, _cat(it.get("category_id")))
             old_receipt = (db.get_product(int(pid)) or {}).get("receipt_id")
-            fields = dict(purchased=1, purchased_at=when, purchased_price=_num(it.get("price")),
-                          purchased_shop=shop, warranty_months=_months(it.get("warranty_months")))
             if receipt_id:
                 fields["receipt_id"] = receipt_id
             db.update_product(int(pid), **fields)

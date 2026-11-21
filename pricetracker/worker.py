@@ -499,6 +499,7 @@ class Worker:
                 "url": l["url"], "target": product.get("target_price"),
                 "screenshot": str(self.data_dir / shot) if shot else None}
         base["listing_id"] = l.get("id")
+        base["product_id"] = product.get("id")
 
         def eur_of(h):
             v = h["price_eur"] if "price_eur" in h.keys() else None
@@ -558,9 +559,11 @@ class Worker:
             except Exception:  # noqa: BLE001
                 pass
         if settings.get("email_enabled"):
-            self._email(settings, subject, text, body, [a["screenshot"] for a in alerts if a.get("screenshot")])
+            self._email(settings, subject, text, body, [a["screenshot"] for a in alerts if a.get("screenshot")],
+                        product_ids=sorted({a["product_id"] for a in alerts if a.get("product_id")}))
 
-    def _email(self, settings, subject, text, body=None, attachments=None, queue_on_fail=True) -> bool:
+    def _email(self, settings, subject, text, body=None, attachments=None, queue_on_fail=True,
+               product_ids=None) -> bool:
         """Στέλνει email. Αν αποτύχει, μπαίνει σε ουρά και ξαναδοκιμάζεται (έως 48 ώρες), και το σφάλμα
         φαίνεται στην εφαρμογή αντί να χάνεται σε ένα log."""
         try:
@@ -572,7 +575,8 @@ class Worker:
                 with self._outbox_lock:
                     box = list(self.db.get_settings().get("email_outbox") or [])
                     box.append({"subject": subject, "text": text, "body": body,
-                                "attachments": list(attachments or []), "ts": time.time(), "tries": 1})
+                                "attachments": list(attachments or []), "ts": time.time(), "tries": 1,
+                                "product_ids": list(product_ids or [])})  # για να βγει αν σβηστεί το προϊόν
                     self.db.set_settings({"email_outbox": box[-50:]})
             return False
 
@@ -836,8 +840,8 @@ class Worker:
     def search_product(self, product_id: int, label: str | None = None) -> list[str]:
         """Αναζήτηση στα καταστήματα που δεν έχουν ακόμα το προϊόν. Επιστρέφει τα καταστήματα με νέες προτάσεις."""
         product = self.db.get_product(product_id)
-        if not product:
-            return []
+        if not product or product.get("purchased"):
+            return []  # ένα αγορασμένο προϊόν δεν ψάχνεται πια
         existing = self.db.list_listings(product_id=product_id, status=None)
         have_shops = {l["shop_id"] for l in existing}
         title = next((l["title"] for l in existing if l.get("title")), product["name"])
@@ -914,6 +918,8 @@ class Worker:
                             if self._mark_search_broken(broken_now, s, True):
                                 broken_changed = True
                                 self._log(f"{s['name']}: η αναζήτηση ανοίγει την αρχική σελίδα – έλεγξε το URL αναζήτησης")
+                        if cands and (self.db.get_product(product_id) or {}).get("purchased", 1):
+                            cands = []  # αγοράστηκε ή διαγράφηκε όσο έτρεχε η αναζήτηση
                         for c in cands:
                             self.db.add_listing(product_id, c["url"], status="candidate", title=c["title"])
                             found += 1
