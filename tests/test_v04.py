@@ -206,3 +206,73 @@ def test_add_shop_without_search_url_starts_detection(tmp_path):
     r = c.post("/api/shops", json={"name": "MyShop", "domain": "myshop.gr", "region": "GR"}).json
     assert r["detecting"] and w.jobs == [("detect_search", {"shop_id": r["id"]})]
     assert c.get(f"/api/shops/{r['id']}/detect").json["state"] == "queued"
+
+
+def test_purchase_removes_search_data_keeps_purchase(tmp_path):
+    db = Database(tmp_path / "db.sqlite")
+    c = create_app(db, FakeWorker(), tmp_path).test_client()
+    pid = db.create_product("PSU")
+    lid = db.add_listing(pid, "https://www.plaisio.gr/p/1")
+    db.add_listing(pid, "https://www.public.gr/p/2", status="candidate")
+    shot = _shot(tmp_path, db, pid, lid, "a")
+    db.record_alert(lid, "drop", 90.0)
+    rid = _buy(c, pid)
+    p = db.get_product(pid)
+    assert p["purchased"] == 1 and p["receipt_id"] == rid and p["warranty_months"] == 24
+    assert db.list_listings(pid, status=None) == [] and db.history() == [] and not shot.exists()
+    with db.conn() as con:
+        assert con.execute("SELECT COUNT(*) FROM alerts_sent").fetchone()[0] == 0
+    assert (tmp_path / db.get_receipt(rid)["file"]).exists()
+
+
+def test_delete_drops_queued_email_and_leaves_no_trace_in_db_file(tmp_path):
+    db = Database(tmp_path / "db.sqlite")
+    c = create_app(db, FakeWorker(), tmp_path).test_client()
+    pid = db.create_product("ZXQ Unique Laptop")
+    keep = db.create_product("Other")
+    lid = db.add_listing(pid, "https://www.plaisio.gr/p/1")
+    lid2 = db.add_listing(keep, "https://www.plaisio.gr/p/2")
+    shot = _shot(tmp_path, db, pid, lid, "a")
+    other = _shot(tmp_path, db, keep, lid2, "b")
+    db.set_settings({"email_outbox": [
+        {"subject": "Πτώση", "text": "x", "attachments": [str(shot)], "ts": 1},
+        {"subject": "Και τα δύο", "text": "y", "attachments": [str(shot), str(other)], "ts": 2},
+        {"subject": "Εγγύηση", "text": "z", "attachments": [], "ts": 3}]})
+    assert c.delete(f"/api/products/{pid}").status_code == 200
+    box = db.get_settings()["email_outbox"]
+    assert [m["subject"] for m in box] == ["Και τα δύο", "Εγγύηση"] and box[0]["attachments"] == [str(other)]
+    raw = b"".join(f.read_bytes() for f in tmp_path.glob("db.sqlite*"))
+    assert "ZXQ Unique Laptop".encode() not in raw  # secure_delete: δεν μένει στο αρχείο της βάσης
+
+
+def test_unbuy_drops_orphan_receipt_record_and_searches_again(tmp_path):
+    class W(FakeWorker):
+        jobs = []
+
+        def enqueue(self, *a, **k):
+            self.jobs.append((a, k))
+            return True
+
+    db = Database(tmp_path / "db.sqlite")
+    w = W()
+    c = create_app(db, w, tmp_path).test_client()
+    pid = db.create_product("PSU")
+    rid = _buy(c, pid)
+    f = tmp_path / db.get_receipt(rid)["file"]
+    assert c.post(f"/api/products/{pid}/purchased", json={"purchased": False}).status_code == 200
+    assert db.get_receipt(rid) is None and f.exists()  # το αρχείο μένει στον φάκελο, όπως λέει το μήνυμα
+    assert (("search_product",), {"product_id": pid}) in w.jobs
+
+
+def test_replaced_receipt_is_removed(tmp_path):
+    db = Database(tmp_path / "db.sqlite")
+    c = create_app(db, FakeWorker(), tmp_path).test_client()
+    pid = db.create_product("PSU")
+    r1 = _buy(c, pid, "a.pdf")
+    f1 = tmp_path / db.get_receipt(r1)["file"]
+    r = c.post(f"/api/products/{pid}/receipt", content_type="multipart/form-data",
+               data={"receipt": (io.BytesIO(b"%PDF2"), "b.pdf")})
+    assert r.status_code == 200 and r.json["receipt_id"] != r1
+    assert db.get_receipt(r1) is None
+    files = [x for x in f1.parent.iterdir()]  # μόνο η νέα απόδειξη (παίρνει το ίδιο όνομα)
+    assert len(files) == 1 and files[0].read_bytes() == b"%PDF2"

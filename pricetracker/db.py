@@ -201,6 +201,7 @@ class Database:
             c = sqlite3.connect(self.path, timeout=30)
             c.row_factory = sqlite3.Row
             c.execute("PRAGMA foreign_keys = ON")
+            c.execute("PRAGMA secure_delete = ON")  # ό,τι σβήνεται γράφεται από πάνω με μηδενικά, δεν μένει στο αρχείο
             try:
                 yield c
                 c.commit()

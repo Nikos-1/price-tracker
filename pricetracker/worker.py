@@ -448,8 +448,9 @@ class Worker:
             self.db.record_check(l["id"], info.price, info.currency, in_stock, title=info.title, screenshot=shot,
                                  price_eur=price_eur, source=src, stock_known=stock_known, offers=offers)
         except Exception:
-            if shot:  # η σελίδα/το προϊόν διαγράφηκε στο μεταξύ: να μη μείνει ορφανό screenshot
+            if shot:  # η σελίδα/το προϊόν διαγράφηκε στο μεταξύ: να μη μείνει ορφανό screenshot ούτε άδειος φάκελος
                 productdirs.remove_tree(self.data_dir / shot)
+                productdirs.remove_empty_parents(self.data_dir / shot, self.data_dir)
             raise
         if shot:
             # Το νέο screenshot (με διαθεσιμότητα) αντικαθιστά όσα τραβήχτηκαν όταν το προϊόν δεν ήταν διαθέσιμο

@@ -350,7 +350,7 @@ async function markPurchased(p) {
       <td><input data-price value="${ob ? num2(ob.price) : ""}" placeholder="τιμή €" style="width:100px"></td><td>${warrantyInput("o" + o.id)}</td></tr>`;
   }).join("");
   modal(`<h2>Αγοράστηκε: ${esc(p.name)}</h2>
-    <p class="hint">Τα αγορασμένα προϊόντα σταματούν να ελέγχονται. Το ιστορικό τιμών μένει.</p>
+    <p class="hint">Τα αγορασμένα προϊόντα σταματούν να ελέγχονται: τα καταστήματα, το ιστορικό τιμών και τα screenshots τους σβήνονται. Μένουν η αγορά, η εγγύηση και η απόδειξη.</p>
     <div class="two"><div><label>Τιμή αγοράς (€)</label><input id="pp-price" value="${best ? num2(best.price) : ""}"></div>
     <div><label>Ημερομηνία αγοράς</label>${dateField("pp-date", localDate())}</div></div>
     <div class="two"><div><label>Κατάστημα</label><input id="pp-shop" value="${esc(best ? best.shop : "")}"></div>
